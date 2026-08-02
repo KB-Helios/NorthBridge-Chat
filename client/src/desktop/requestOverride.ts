@@ -99,6 +99,45 @@ export function createDesktopRequestOverride(transport: DesktopTransport): Reque
     if (method === 'GET' && path === '/api/search/enable') {
       return handled(true);
     }
+    if (method === 'GET' && path === '/api/messages' && parsed.searchParams.has('search')) {
+      const query = parsed.searchParams.get('search')?.trim() ?? '';
+      if (query === '') {
+        return handled({ messages: [], nextCursor: null });
+      }
+      const requestedLimit = Number.parseInt(parsed.searchParams.get('pageSize') ?? '25', 10);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.min(Math.max(requestedLimit, 1), 100)
+        : 25;
+      const hits = await transport.searchMessages(query, limit);
+      const conversationIds = [...new Set(hits.map((hit) => hit.conversationId))];
+      const contexts = await Promise.all(
+        conversationIds.map(async (conversationId) => {
+          const [conversation, messages] = await Promise.all([
+            transport.getConversation(conversationId),
+            transport.listAllConversationMessages(conversationId),
+          ]);
+          return { conversation, messages };
+        }),
+      );
+      const contextByConversation = new Map(
+        contexts.map((context) => [context.conversation.id, context]),
+      );
+      const messages = hits.flatMap((hit) => {
+        const context = contextByConversation.get(hit.conversationId);
+        const message = context?.messages.find((candidate) => candidate.id === hit.messageId);
+        if (context == null || message == null) {
+          return [];
+        }
+        return [
+          {
+            ...desktopMessageToLibreChat(message),
+            title: context.conversation.title,
+            text: hit.content,
+          },
+        ];
+      });
+      return handled({ messages, nextCursor: null });
+    }
     if (method === 'GET' && path === '/api/banner') {
       return handled(null);
     }

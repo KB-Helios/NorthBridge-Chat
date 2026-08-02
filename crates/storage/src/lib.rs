@@ -5,6 +5,7 @@ mod error;
 mod generations;
 mod knowledge;
 mod models;
+mod package_import;
 mod platform;
 mod rows;
 mod search;
@@ -24,6 +25,7 @@ pub use knowledge::{
     DenseJournalEntry, KnowledgeChunkRecord, KnowledgeLexicalHit, NewKnowledgeChunk,
     NewKnowledgeDocument, NewKnowledgeStack, NewKnowledgeWatchRoot, StoredEmbedding,
 };
+pub use package_import::PackageImportTransaction;
 pub use platform::{NewArtifact, NewCredentialReference, NewEnvironment, NewMediaProvider};
 use sqlx::{
     SqlitePool,

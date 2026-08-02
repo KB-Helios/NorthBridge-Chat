@@ -89,33 +89,6 @@ pub(crate) async fn require_bearer(
             .authenticate_session_hash(&token_hash)
             .await?
             .ok_or_else(ApiError::unauthorized)?;
-        if !state
-            .database
-            .team_policy_allows(
-                user.workspace_id,
-                user.role,
-                request.method().as_str(),
-                request.uri().path(),
-            )
-            .await?
-        {
-            let _ = state
-                .database
-                .append_audit_event(
-                    user.workspace_id,
-                    &format!("user:{}", user.id),
-                    request.method().as_str(),
-                    request.uri().path(),
-                    "403",
-                    request
-                        .headers()
-                        .get("x-request-id")
-                        .and_then(|value| value.to_str().ok()),
-                    &json!({ "policyDenied": true }),
-                )
-                .await;
-            return Err(ApiError::forbidden());
-        }
         AuthenticatedPrincipal {
             id: format!("user:{}", user.id),
             user_id: Some(user.id),
@@ -126,6 +99,36 @@ pub(crate) async fn require_bearer(
     } else {
         return Err(ApiError::unauthorized());
     };
+    if !state
+        .database
+        .team_policy_allows(
+            principal.workspace_id,
+            principal.role,
+            request.method().as_str(),
+            request.uri().path(),
+        )
+        .await?
+    {
+        let _ = state
+            .database
+            .append_audit_event(
+                principal.workspace_id,
+                &principal.id,
+                request.method().as_str(),
+                request.uri().path(),
+                "403",
+                request
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok()),
+                &json!({
+                    "desktopSession": principal.desktop_session,
+                    "policyDenied": true
+                }),
+            )
+            .await;
+        return Err(ApiError::forbidden());
+    }
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let request_id = request

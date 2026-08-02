@@ -233,22 +233,37 @@ impl GenerationCoordinator {
     }
 
     async fn persisted_assistant_text(&self, generation_id: Uuid) -> Result<String, StorageError> {
-        let events = self
-            .inner
-            .database
-            .list_generation_events(generation_id, 0, 10_000)
-            .await?;
-        Ok(events
-            .into_iter()
-            .filter(|event| event.event_type == "delta")
-            .filter_map(|event| {
-                event
-                    .payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .collect())
+        const PAGE_SIZE: u32 = 10_000;
+
+        let mut after_sequence = 0;
+        let mut output = String::new();
+        loop {
+            let events = self
+                .inner
+                .database
+                .list_generation_events(generation_id, after_sequence, PAGE_SIZE)
+                .await?;
+            if events.is_empty() {
+                break;
+            }
+
+            let page_is_full = events.len() == PAGE_SIZE as usize;
+            after_sequence = events
+                .last()
+                .map(|event| event.sequence_number)
+                .unwrap_or(after_sequence);
+            for event in events {
+                if event.event_type == "delta"
+                    && let Some(text) = event.payload.get("text").and_then(Value::as_str)
+                {
+                    output.push_str(text);
+                }
+            }
+            if !page_is_full {
+                break;
+            }
+        }
+        Ok(output)
     }
 
     async fn execute_generation(
@@ -576,7 +591,11 @@ const fn role_name(role: MessageRole) -> &'static str {
 
 fn bounded_error(mut message: String) -> String {
     if message.len() > 4096 {
-        message.truncate(4096);
+        let mut boundary = 4096;
+        while !message.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        message.truncate(boundary);
         message.push_str("...");
     }
     message
@@ -677,5 +696,8 @@ mod tests {
         let events = decoder.push(b"data: one\ndata: two\n\n").unwrap();
         assert_eq!(events, ["one\ntwo"]);
         assert!(bounded_error("x".repeat(5000)).ends_with("..."));
+        let multibyte = bounded_error("é".repeat(3000));
+        assert!(multibyte.ends_with("..."));
+        assert!(multibyte.len() <= 4099);
     }
 }

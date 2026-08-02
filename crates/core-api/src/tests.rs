@@ -6,11 +6,13 @@ use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use northbridge_domain::{
     DEFAULT_WORKSPACE_ID, EnvironmentVariableRef, McpServer, McpTransport, NorthbridgePackage,
-    RemoteAgent,
+    RemoteAgent, TeamRole,
 };
 use northbridge_model_manager::{ModelManager, ModelManagerConfig};
 use northbridge_retrieval::{EmbeddingProvider, Result as RetrievalResult};
-use northbridge_storage::{Database, NewCredentialReference, NewEnvironment, NewMcpServer};
+use northbridge_storage::{
+    Database, NewCredentialReference, NewEnvironment, NewMcpServer, NewTeamPolicy,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -219,6 +221,30 @@ async fn rejects_malformed_remote_login_inputs_before_password_work() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+#[tokio::test]
+async fn explicit_policy_denials_apply_to_the_privileged_desktop_token() {
+    let (api, database, _directory) = test_api().await;
+    database
+        .create_team_policy(NewTeamPolicy {
+            workspace_id: Uuid::parse_str(DEFAULT_WORKSPACE_ID).unwrap(),
+            name: "Deny conversation reads".to_string(),
+            method: "GET".to_string(),
+            path_prefix: "/v1/conversations".to_string(),
+            minimum_role: TeamRole::Viewer,
+            effect: "deny".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let response = api
+        .router()
+        .oneshot(request("GET", "/v1/conversations", Value::Null))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -763,6 +789,7 @@ async fn replays_generation_events_after_the_resume_cursor() {
         .await
         .unwrap();
     let generation_id = generation.id;
+    database.start_generation_run(generation_id).await.unwrap();
     let events = api.generation_events();
     events
         .append(generation_id, "delta", json!({ "text": "one" }))
@@ -772,11 +799,15 @@ async fn replays_generation_events_after_the_resume_cursor() {
         .append(generation_id, "delta", json!({ "text": "two" }))
         .await
         .unwrap();
+    events
+        .complete_with_text(generation_id, "onetwo".to_string())
+        .await
+        .unwrap();
 
     let response = router
         .oneshot(request(
             "GET",
-            &format!("/v1/generations/{generation_id}/events?after=1"),
+            &format!("/v1/generations/{generation_id}/events?after=2"),
             Value::Null,
         ))
         .await
@@ -786,14 +817,14 @@ async fn replays_generation_events_after_the_resume_cursor() {
         response.headers()[http::header::CONTENT_TYPE],
         "text/event-stream"
     );
-    let mut body = response.into_body();
-    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+    let body = tokio::time::timeout(Duration::from_secs(2), response.into_body().collect())
         .await
         .unwrap()
-        .unwrap()
         .unwrap();
-    let payload = std::str::from_utf8(frame.data_ref().unwrap()).unwrap();
-    assert!(payload.contains("id: 2"));
+    let bytes = body.to_bytes();
+    let payload = std::str::from_utf8(&bytes).unwrap();
+    assert!(payload.contains("id: 3"));
+    assert!(payload.contains("event: completed"));
     assert!(payload.contains("\"text\":\"two\""));
     assert!(!payload.contains("\"text\":\"one\""));
 }
@@ -1107,6 +1138,60 @@ async fn package_import_preserves_existing_integrations_and_disables_new_ones() 
         .find(|agent| agent.name == "imported-tools-remote")
         .unwrap();
     assert!(!imported_remote.enabled);
+}
+
+#[tokio::test]
+async fn package_import_rolls_back_entities_created_before_a_late_validation_error() {
+    let (api, database, _directory) = test_api().await;
+    let workspace_id = Uuid::parse_str(DEFAULT_WORKSPACE_ID).unwrap();
+    let package = json!({
+        "schemaVersion": 1,
+        "name": "Atomic import",
+        "description": "",
+        "personas": [{
+            "id": Uuid::now_v7(),
+            "workspaceId": workspace_id,
+            "name": "Imported persona",
+            "description": "",
+            "systemPrompt": "You are helpful.",
+            "version": 1,
+            "createdAtMs": 0,
+            "updatedAtMs": 0
+        }],
+        "skills": [{
+            "id": Uuid::now_v7(),
+            "workspaceId": workspace_id,
+            "slug": "invalid_late_skill",
+            "name": "Invalid late skill",
+            "description": "",
+            "instructions": "",
+            "permissionManifest": {},
+            "version": 1,
+            "createdAtMs": 0,
+            "updatedAtMs": 0
+        }],
+        "agents": [],
+        "mcpServers": [],
+        "remoteAgents": [],
+        "workflows": [],
+        "environments": [],
+        "artifacts": []
+    });
+
+    let response = api
+        .router()
+        .oneshot(request("POST", "/v1/packages/import", package))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        database
+            .list_personas(workspace_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.list_skills(workspace_id).await.unwrap().is_empty());
 }
 
 fn package_with_mcp_server(name: &str, command: &str, enabled: bool) -> Value {

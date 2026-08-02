@@ -1,6 +1,6 @@
 import type { DesktopTransport } from '@northbridge/desktop-transport';
-import { DESKTOP_ENDPOINT, createDesktopRequestOverride } from './requestOverride';
 import { DESKTOP_FALLBACK_MODEL_ID, setDesktopModelCatalogForTest } from './modelSelection';
+import { DESKTOP_ENDPOINT, createDesktopRequestOverride } from './requestOverride';
 
 const modelCatalog = {
   models: [
@@ -47,6 +47,15 @@ function transportMock(): jest.Mocked<DesktopTransport> {
     getConversation: jest.fn().mockResolvedValue(conversation),
     deleteConversation: jest.fn().mockResolvedValue(undefined),
     listAllConversationMessages: jest.fn().mockResolvedValue([message]),
+    searchMessages: jest.fn().mockResolvedValue([
+      {
+        messageId: message.id,
+        conversationId: conversation.id,
+        partId: 'part-1',
+        content: 'Hello locally',
+        score: -1,
+      },
+    ]),
   } as unknown as jest.Mocked<DesktopTransport>;
 }
 
@@ -108,6 +117,32 @@ describe('createDesktopRequestOverride', () => {
     expect(transport.deleteConversation).toHaveBeenCalledWith(conversation.id);
     await expect(override({ method: 'GET', url: '/api/not-desktop-owned' })).resolves.toEqual({
       handled: false,
+    });
+  });
+
+  it('maps desktop full-text search to the message-list response contract', async () => {
+    const transport = transportMock();
+    const override = createDesktopRequestOverride(transport);
+
+    const result = await override({
+      method: 'GET',
+      url: '/api/messages?search=Hello&pageSize=10',
+    });
+
+    expect(transport.searchMessages).toHaveBeenCalledWith('Hello', 10);
+    expect(result).toMatchObject({
+      handled: true,
+      data: {
+        messages: [
+          {
+            messageId: message.id,
+            conversationId: conversation.id,
+            title: conversation.title,
+            text: 'Hello locally',
+          },
+        ],
+        nextCursor: null,
+      },
     });
   });
 });

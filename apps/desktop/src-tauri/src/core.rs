@@ -106,6 +106,10 @@ impl CoreRuntime {
             .env("NORTHBRIDGE_CONTROL_TOKEN", &control_token)
             .arg("--database")
             .arg(&database_path);
+        #[cfg(debug_assertions)]
+        {
+            command = command.arg("--allowed-origin").arg("http://localhost:3090");
+        }
         if let Some(bundle) = ai_bundle(app)? {
             command = command
                 .env("NORTHBRIDGE_AGENTGATEWAY_PATH", bundle.agentgateway)

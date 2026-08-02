@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSetRecoilState } from 'recoil';
+import { getDesktopTransport } from '@northbridge/desktop-transport';
 import {
   Constants,
   type EventSubmission,
@@ -14,10 +15,9 @@ import {
   desktopConversationToLibreChat,
   desktopMessageToLibreChat,
 } from '~/desktop/requestOverride';
-import { ensureDesktopModelSelection } from '~/desktop/modelSelection';
-import { getActiveKnowledgeStackIds } from '~/desktop/knowledgeSelection';
 import { clearDesktopGeneration, registerDesktopGeneration } from '~/desktop/generationRegistry';
-import { getDesktopTransport } from '@northbridge/desktop-transport';
+import { getActiveKnowledgeStackIds } from '~/desktop/knowledgeSelection';
+import { ensureDesktopModelSelection } from '~/desktop/modelSelection';
 import useEventHandlers from './useEventHandlers';
 import store from '~/store';
 
@@ -226,9 +226,42 @@ export default function useDesktopSSE(
         generationId: generation.id,
         transport,
       });
-      if (resumeGenerationId == null) {
-        await transport.startGeneration(generation.id);
+      if (resumeGenerationId == null || generation.status === 'queued') {
+        generation = await transport.startGeneration(generation.id);
       }
+
+      const terminalMessages = async (event: GenerationEvent, unfinished: boolean) => {
+        if (generationId == null) {
+          throw new Error('The terminal generation is missing its persisted identifier.');
+        }
+        const [storedConversation, storedMessages, persistedGeneration] = await Promise.all([
+          transport.getConversation(desktopConversation.id),
+          transport.listAllConversationMessages(desktopConversation.id),
+          transport.getGeneration(generationId),
+        ]);
+        const runMessages = storedMessages.map(desktopMessageToLibreChat);
+        const outputMessageId =
+          generationOutputMessageId(event) ?? persistedGeneration.outputMessageId;
+        const persistedResponse =
+          outputMessageId == null
+            ? undefined
+            : runMessages.find((message) => message.messageId === outputMessageId);
+        const finalResponse: TMessage = persistedResponse ?? {
+          ...responseMessage,
+          text: accumulatedText,
+          unfinished,
+        };
+        return {
+          conversation: desktopConversationToLibreChat(storedConversation),
+          requestMessage:
+            runMessages.find((message) => message.messageId === storedUserMessage.id) ??
+            requestMessage,
+          responseMessage: finalResponse,
+          runMessages: runMessages.some((message) => message.messageId === finalResponse.messageId)
+            ? runMessages
+            : [...runMessages, finalResponse],
+        };
+      };
 
       for await (const event of transport.streamGenerationEvents(generation.id, {
         signal: streamController.signal,
@@ -239,67 +272,12 @@ export default function useDesktopSSE(
           continue;
         }
         if (event.eventType === 'completed') {
-          const [storedConversation, storedMessages] = await Promise.all([
-            transport.getConversation(desktopConversation.id),
-            transport.listAllConversationMessages(desktopConversation.id),
-          ]);
-          const runMessages = storedMessages.map(desktopMessageToLibreChat);
-          const finalRequest = runMessages.find(
-            (message) => message.messageId === storedUserMessage.id,
-          );
-          const finalResponse = runMessages.find(
-            (message) => message.messageId === generationOutputMessageId(event),
-          );
-          finalHandler(
-            {
-              conversation: desktopConversationToLibreChat(storedConversation),
-              requestMessage: finalRequest,
-              responseMessage: finalResponse,
-              runMessages,
-            },
-            effectiveSubmission,
-          );
+          finalHandler(await terminalMessages(event, false), effectiveSubmission);
           finish('completed');
           return;
         }
         if (event.eventType === 'cancelled') {
-          const outputMessageId = generationOutputMessageId(event);
-          if (outputMessageId != null) {
-            const [storedConversation, storedMessages] = await Promise.all([
-              transport.getConversation(desktopConversation.id),
-              transport.listAllConversationMessages(desktopConversation.id),
-            ]);
-            const runMessages = storedMessages.map(desktopMessageToLibreChat);
-            finalHandler(
-              {
-                conversation: desktopConversationToLibreChat(storedConversation),
-                requestMessage: runMessages.find(
-                  (message) => message.messageId === storedUserMessage.id,
-                ),
-                responseMessage: runMessages.find(
-                  (message) => message.messageId === outputMessageId,
-                ),
-                runMessages,
-              },
-              effectiveSubmission,
-            );
-            finish('aborted');
-            return;
-          }
-          const partialResponse: TMessage = {
-            ...responseMessage,
-            text: accumulatedText,
-            unfinished: true,
-          };
-          finalHandler(
-            {
-              conversation,
-              requestMessage,
-              responseMessage: partialResponse,
-              runMessages: [...effectiveSubmission.messages, requestMessage, partialResponse],
-            },
-            effectiveSubmission,
-          );
+          finalHandler(await terminalMessages(event, true), effectiveSubmission);
           finish('aborted');
           return;
         }

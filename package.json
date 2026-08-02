@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "desktop:core": "cargo run -p northbridge-desktop-core --",
+    "desktop:transport:build": "npm --workspace @northbridge/desktop-transport run build",
     "desktop:stage-core": "node apps/desktop/scripts/stage-core.mjs",
     "desktop:stage-sidecars": "node apps/desktop/scripts/stage-sidecars.mjs",
     "desktop:stage": "npm run desktop:stage-core && npm run desktop:stage-sidecars",

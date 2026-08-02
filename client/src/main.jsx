@@ -1,15 +1,15 @@
 import './polyfills/regeneratorRuntime';
 import { createRoot } from 'react-dom/client';
-import { initializeDesktopTransport, isDesktopRuntime } from '@northbridge/desktop-transport';
 import { setRequestOverride } from 'librechat-data-provider';
+import { initializeDesktopTransport, isDesktopRuntime } from '@northbridge/desktop-transport';
 import { initializeI18n } from './locales/i18n';
 import App from './App';
 import '@librechat/client/style.css';
 import './style.css';
 import './mobile.css';
-import DesktopStartupError from './components/Desktop/StartupError';
-import { createDesktopRequestOverride } from './desktop/requestOverride';
 import { ApiErrorBoundaryProvider } from './hooks/ApiErrorBoundaryContext';
+import { createDesktopRequestOverride } from './desktop/requestOverride';
+import { DesktopStartupError } from './components/Desktop';
 import 'katex/dist/katex.min.css';
 import 'katex/dist/contrib/copy-tex.js';
 

@@ -1423,6 +1423,12 @@ async fn cancellation_persists_partial_assistant_output_atomically() {
         )
         .await
         .unwrap();
+    let queued = database
+        .list_active_generation_runs(conversation.id)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].status, GenerationStatus::Queued);
     database.start_generation_run(run.id).await.unwrap();
     assert_eq!(
         database

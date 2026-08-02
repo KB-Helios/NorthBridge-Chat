@@ -13,7 +13,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 axum.workspace = true
 northbridge-ai-gateway = { path = "../ai-gateway" }
-northbridge-agent-runtime = { path = "../agent-runtime" }
 northbridge-core-api = { path = "../core-api" }
 northbridge-domain = { path = "../domain" }
 northbridge-model-manager = { path = "../model-manager" }
@@ -23,6 +22,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tower.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

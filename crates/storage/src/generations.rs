@@ -322,7 +322,7 @@ impl Database {
                     load_profile_json, status,
                     last_sequence, created_at_ms, updated_at_ms
              FROM generation_runs
-             WHERE conversation_id = ? AND status IN ('running', 'waiting_for_approval')
+             WHERE conversation_id = ? AND status IN ('queued', 'running', 'waiting_for_approval')
              ORDER BY created_at_ms, id",
         )
         .bind(conversation_id.to_string())

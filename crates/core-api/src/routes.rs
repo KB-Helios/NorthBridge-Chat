@@ -260,6 +260,24 @@ async fn select_model(
     State(state): State<ApiState>,
     Json(request): Json<SelectModelRequest>,
 ) -> Result<Json<ModelCatalogResponse>, ApiError> {
+    ensure_model_reload_allowed(&state).await?;
+    let selection =
+        resolve_model_selection(&state, request.model_id.trim(), request.load_profile).await?;
+    if state.ai_runtime.selection().as_ref() != Some(&selection) {
+        activate_model_selection(&state, selection, true).await?;
+    }
+    Ok(Json(model_catalog_response(&state).await?))
+}
+
+pub(crate) async fn reload_selected_model(state: &ApiState) -> Result<(), ApiError> {
+    let Some(selection) = state.ai_runtime.selection() else {
+        return Ok(());
+    };
+    ensure_model_reload_allowed(state).await?;
+    activate_model_selection(state, selection, false).await
+}
+
+pub(crate) async fn ensure_model_reload_allowed(state: &ApiState) -> Result<(), ApiError> {
     if state.generations.has_active().await {
         return Err(ApiError::conflict(
             "generation_active",
@@ -295,18 +313,22 @@ async fn select_model(
             "finish or cancel active media jobs before changing the local model",
         ));
     }
-    let selection =
-        resolve_model_selection(&state, request.model_id.trim(), request.load_profile).await?;
-    if state.ai_runtime.selection().as_ref() == Some(&selection) {
-        return Ok(Json(model_catalog_response(&state).await?));
-    }
+    Ok(())
+}
+
+async fn activate_model_selection(
+    state: &ApiState,
+    selection: ModelSelection,
+    persist_selection: bool,
+) -> Result<(), ApiError> {
+    let workspace_id = parse_default_workspace_id()?;
     let factory = state.ai_factory.current().ok_or_else(|| {
         ApiError::unavailable(
             "local_ai_bundle_unavailable",
             "the verified local AI sidecar bundle is not available",
         )
     })?;
-    let runtime_reference = resolve_runtime_reference(&state, &selection.model_id).await?;
+    let runtime_reference = resolve_runtime_reference(state, &selection.model_id).await?;
     let runtime = factory
         .prepare_with_profile(
             runtime_reference,
@@ -326,49 +348,55 @@ async fn select_model(
         let _ = runtime.shutdown().await;
         return Err(error.into());
     }
-    let setting = serde_json::to_value(&selection).map_err(|error| {
-        ApiError::invalid(format!("failed to serialize model selection: {error}"))
-    })?;
-    if let Err(error) = state
-        .database
-        .set_json_setting(
-            DESKTOP_SETTINGS_SCOPE,
-            MODEL_SELECTION_SETTING_KEY,
-            &setting,
-        )
-        .await
-    {
-        let _ = agent_runtime.shutdown(Duration::from_secs(5)).await;
-        let _ = runtime.shutdown().await;
-        return Err(error.into());
+    if persist_selection {
+        let setting = serde_json::to_value(&selection).map_err(|error| {
+            ApiError::invalid(format!("failed to serialize model selection: {error}"))
+        })?;
+        if let Err(error) = state
+            .database
+            .set_json_setting(
+                DESKTOP_SETTINGS_SCOPE,
+                MODEL_SELECTION_SETTING_KEY,
+                &setting,
+            )
+            .await
+        {
+            let _ = agent_runtime.shutdown(Duration::from_secs(5)).await;
+            let _ = runtime.shutdown().await;
+            return Err(error.into());
+        }
     }
     if let Some(previous) = state.agents.replace(agent_runtime)
         && !previous.shutdown(Duration::from_secs(5)).await
     {
         tracing::warn!("previous agent runtime did not stop within the model-switch window");
     }
-    let recovered_shadows = state.shadows.recover(workspace_id).await?;
-    if recovered_shadows > 0 {
-        tracing::info!(
-            count = recovered_shadows,
-            "resumed pending Shadow Persona suggestions"
-        );
-    }
-    let recovered_crews = state.crews.recover(workspace_id).await?;
-    if recovered_crews > 0 {
-        tracing::info!(count = recovered_crews, "resumed pending Crew runs");
-    }
     for previous in state.ai_runtime.replace(selection, runtime) {
         if let Err(error) = previous.runtime.shutdown().await {
             tracing::error!(%error, "failed to shut down a previously loaded local model");
         }
     }
-    state
-        .media
-        .synchronize_gateway_routes()
-        .await
-        .map_err(super::platform_routes::media_error)?;
-    Ok(Json(model_catalog_response(&state).await?))
+    match state.shadows.recover(workspace_id).await {
+        Ok(recovered) if recovered > 0 => tracing::info!(
+            count = recovered,
+            "resumed pending Shadow Persona suggestions"
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "failed to resume Shadow Persona suggestions after loading the model")
+        }
+    }
+    match state.crews.recover(workspace_id).await {
+        Ok(recovered) if recovered > 0 => {
+            tracing::info!(count = recovered, "resumed pending Crew runs");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "failed to resume Crew runs after loading the model"),
+    }
+    if let Err(error) = state.media.synchronize_gateway_routes().await {
+        tracing::warn!(%error, "failed to synchronize media routes after loading the model");
+    }
+    Ok(())
 }
 
 async fn hardware_diagnostics(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
@@ -1245,13 +1273,21 @@ async fn generation_events(
         let mut last_sequence = after_sequence;
         for event in initial {
             last_sequence = event.sequence_number;
+            let terminal = is_terminal_generation_event(&event);
             yield Ok::<Event, Infallible>(sse_event(&event));
+            if terminal {
+                return;
+            }
         }
-        loop {
+        'events: loop {
             match receiver.recv().await {
                 Ok(event) if event.sequence_number > last_sequence => {
                     last_sequence = event.sequence_number;
+                    let terminal = is_terminal_generation_event(&event);
                     yield Ok(sse_event(&event));
+                    if terminal {
+                        break;
+                    }
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1259,7 +1295,11 @@ async fn generation_events(
                         Ok(events) => {
                             for event in events {
                                 last_sequence = event.sequence_number;
+                                let terminal = is_terminal_generation_event(&event);
                                 yield Ok(sse_event(&event));
+                                if terminal {
+                                    break 'events;
+                                }
                             }
                         }
                         Err(error) => {
@@ -1279,6 +1319,13 @@ async fn generation_events(
                 .text("keep-alive"),
         )
         .into_response())
+}
+
+fn is_terminal_generation_event(event: &northbridge_domain::GenerationEvent) -> bool {
+    matches!(
+        event.event_type.as_str(),
+        "completed" | "failed" | "cancelled"
+    )
 }
 
 #[derive(Debug, Deserialize)]

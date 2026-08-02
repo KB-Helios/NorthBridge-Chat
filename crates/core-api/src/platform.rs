@@ -59,6 +59,24 @@ pub async fn load_credential_secret(
     .map_err(|error| CredentialStoreError::Task(error.to_string()))?
 }
 
+pub(crate) async fn load_credential_secret_optional(
+    reference: &CredentialReference,
+) -> Result<Option<String>, CredentialStoreError> {
+    let service = reference.service.clone();
+    let account = reference.account.clone();
+    tokio::task::spawn_blocking(move || {
+        let entry = keyring::Entry::new(&service, &account)
+            .map_err(|error| CredentialStoreError::Store(error.to_string()))?;
+        match entry.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(CredentialStoreError::Store(error.to_string())),
+        }
+    })
+    .await
+    .map_err(|error| CredentialStoreError::Task(error.to_string()))?
+}
+
 pub async fn delete_credential_secret(
     reference: &CredentialReference,
 ) -> Result<(), CredentialStoreError> {

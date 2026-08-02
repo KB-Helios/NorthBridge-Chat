@@ -3,11 +3,15 @@ mod config;
 use std::{io::Write, time::Duration};
 
 use anyhow::{Context, Result};
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode, header},
+};
 use config::Config;
-use northbridge_agent_runtime::{RigAgentRuntime, RigAgentRuntimeConfig};
 use northbridge_core_api::{
     CoreApi, CoreApiConfig, KnowledgeRuntimeConfig, KnowledgeServices,
-    custom_local_model_selection, gateway_runtime_profile, load_credential_secret,
+    custom_local_model_selection, load_credential_secret,
 };
 use northbridge_domain::{
     DESKTOP_SETTINGS_SCOPE, MODEL_SELECTION_SETTING_KEY, ModelSelection, ReadyEvent,
@@ -15,6 +19,7 @@ use northbridge_domain::{
 use northbridge_model_manager::{ModelManager, ModelManagerConfig};
 use northbridge_storage::Database;
 use tokio::net::TcpListener;
+use tower::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -114,54 +119,7 @@ async fn main() -> Result<()> {
         })
         .transpose()?
         .or(persisted_selection);
-    let ai_runtime = match (&ai_factory, &initial_selection) {
-        (Some(factory), Some(selection)) => {
-            let runtime_reference = model_manager
-                .runtime_reference(&selection.model_id)
-                .await
-                .with_context(|| {
-                    format!("failed to resolve selected model {}", selection.model_id)
-                })?
-                .map_or_else(
-                    || selection.model_id.clone().into(),
-                    std::path::PathBuf::into_os_string,
-                );
-            Some(
-                factory
-                    .prepare_with_profile(
-                        runtime_reference,
-                        gateway_runtime_profile(&selection.load_profile),
-                    )
-                    .await
-                    .context("failed to prepare the selected local AI runtime")?,
-            )
-        }
-        (None, Some(_)) => anyhow::bail!(
-            "a model is selected but the verified local AI sidecar bundle is unavailable"
-        ),
-        (_, None) => None,
-    };
-    let agent_runtime = ai_runtime
-        .as_ref()
-        .map(|runtime| {
-            RigAgentRuntime::new(RigAgentRuntimeConfig {
-                database: database.clone(),
-                ai_runtime: runtime.clone(),
-                max_concurrent_runs: 4,
-            })
-        })
-        .transpose()
-        .context("failed to initialize the local agent runtime")?;
-    if let Some(runtime) = &agent_runtime
-        && let Err(error) = runtime
-            .synchronize_gateway_protocols(
-                uuid::Uuid::parse_str(northbridge_domain::DEFAULT_WORKSPACE_ID)
-                    .context("built-in workspace ID is invalid")?,
-            )
-            .await
-    {
-        tracing::warn!(%error, "agentgateway protocol synchronization needs attention");
-    }
+    let session_token = config.session_token.clone();
     let mut api = CoreApi::new(
         database,
         CoreApiConfig {
@@ -176,12 +134,6 @@ async fn main() -> Result<()> {
     }
     api = api.with_model_manager(model_manager);
     api = api.with_knowledge_services(knowledge);
-    if let Some(runtime) = agent_runtime {
-        api = api.with_agent_runtime(runtime);
-    }
-    if let (Some(selection), Some(runtime)) = (initial_selection, ai_runtime) {
-        api = api.with_ai_runtime(selection, runtime);
-    }
     let recovered_shadows = api.recover_shadow_suggestions().await;
     if recovered_shadows > 0 {
         tracing::info!(
@@ -218,9 +170,17 @@ async fn main() -> Result<()> {
     })?;
     tracing::info!(address = %local_address, schema_version, "desktop core ready");
 
-    let server_result = axum::serve(listener, api.router())
+    let router = api.router();
+    let model_warmup = initial_selection.map(|selection| {
+        tokio::spawn(warm_initial_model(router.clone(), session_token, selection))
+    });
+    let server_result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal(api_shutdown))
         .await;
+    if let Some(model_warmup) = model_warmup {
+        model_warmup.abort();
+        let _ = model_warmup.await;
+    }
     let generations_stopped = api.cancel_active_generations(Duration::from_secs(5)).await;
     if !generations_stopped {
         tracing::warn!("active generations did not stop within the graceful shutdown window");
@@ -258,14 +218,54 @@ async fn main() -> Result<()> {
 }
 
 async fn load_persisted_model_selection(database: &Database) -> Result<Option<ModelSelection>> {
-    database
+    let persisted = database
         .get_json_setting(DESKTOP_SETTINGS_SCOPE, MODEL_SELECTION_SETTING_KEY)
-        .await?
-        .map(|value| {
-            serde_json::from_value(value)
-                .context("persisted desktop model selection is invalid or incompatible")
-        })
-        .transpose()
+        .await?;
+    let Some(persisted) = persisted else {
+        return Ok(None);
+    };
+    match serde_json::from_value(persisted) {
+        Ok(selection) => Ok(Some(selection)),
+        Err(error) => {
+            tracing::warn!(%error, "ignoring an invalid persisted desktop model selection");
+            Ok(None)
+        }
+    }
+}
+
+async fn warm_initial_model(router: Router, session_token: String, selection: ModelSelection) {
+    let body = match serde_json::to_vec(&serde_json::json!({
+        "modelId": selection.model_id,
+        "loadProfile": selection.load_profile,
+    })) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize the persisted model selection");
+            return;
+        }
+    };
+    let request = match Request::builder()
+        .method("POST")
+        .uri("/v1/models/selection")
+        .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+    {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, "failed to build the persisted model warmup request");
+            return;
+        }
+    };
+    let response = match router.oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+    if response.status() == StatusCode::OK {
+        tracing::info!("persisted local model is ready");
+    } else {
+        tracing::warn!(status = %response.status(), "persisted local model could not be loaded; the API remains available");
+    }
 }
 
 fn init_tracing() {

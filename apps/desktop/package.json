@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm --prefix ../.. run desktop:stage",
+    "predev": "npm --prefix ../.. run desktop:transport:build && npm --prefix ../.. run desktop:stage",
     "dev": "tauri dev",
-    "prebuild": "npm --prefix ../.. run desktop:stage:release",
+    "prebuild": "npm --prefix ../.. run desktop:transport:build && npm --prefix ../.. run desktop:stage:release",
     "build": "tauri build"
   },
   "devDependencies": {

@@ -26,8 +26,10 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    platform::{delete_credential_secret, store_credential_secret},
-    routes::ApiState,
+    platform::{
+        delete_credential_secret, load_credential_secret_optional, store_credential_secret,
+    },
+    routes::{ApiState, ensure_model_reload_allowed, reload_selected_model},
 };
 
 pub(crate) fn platform_routes() -> Router<ApiState> {
@@ -381,6 +383,9 @@ async fn create_credential(
     State(state): State<ApiState>,
     Json(request): Json<CredentialRequest>,
 ) -> Result<(StatusCode, Json<northbridge_domain::CredentialReference>), ApiError> {
+    if state.ai_runtime.selection().is_some() {
+        ensure_model_reload_allowed(&state).await?;
+    }
     let reference = state
         .database
         .create_credential_reference(NewCredentialReference {
@@ -403,6 +408,22 @@ async fn create_credential(
         credential_environment_key(reference.id).into(),
         secret.into(),
     );
+    if let Err(error) = reload_selected_model(&state).await {
+        state
+            .ai_factory
+            .remove_environment(&credential_environment_key(reference.id).into());
+        if let Err(cleanup_error) = delete_credential_secret(&reference).await {
+            tracing::error!(%cleanup_error, "failed to remove a credential after runtime reload failed");
+        }
+        if let Err(cleanup_error) = state
+            .database
+            .delete_credential_reference(reference.id)
+            .await
+        {
+            tracing::error!(%cleanup_error, "failed to remove a credential reference after runtime reload failed");
+        }
+        return Err(error);
+    }
     Ok((StatusCode::CREATED, Json(reference)))
 }
 
@@ -416,7 +437,15 @@ async fn update_credential(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateCredentialRequest>,
 ) -> Result<Json<northbridge_domain::CredentialReference>, ApiError> {
+    if state.ai_runtime.selection().is_some() {
+        ensure_model_reload_allowed(&state).await?;
+    }
     let reference = state.database.credential_reference(id).await?;
+    let previous_secret = load_credential_secret_optional(&reference)
+        .await
+        .map_err(|error| {
+            ApiError::unavailable("credential_store_unavailable", error.to_string())
+        })?;
     let secret = request.secret;
     store_credential_secret(&reference, secret.clone())
         .await
@@ -427,6 +456,27 @@ async fn update_credential(
         credential_environment_key(reference.id).into(),
         secret.into(),
     );
+    if let Err(error) = reload_selected_model(&state).await {
+        if let Some(previous_secret) = previous_secret {
+            if let Err(rollback_error) =
+                store_credential_secret(&reference, previous_secret.clone()).await
+            {
+                tracing::error!(%rollback_error, "failed to restore a credential after runtime reload failed");
+            }
+            state.ai_factory.set_environment(
+                credential_environment_key(reference.id).into(),
+                previous_secret.into(),
+            );
+        } else {
+            if let Err(rollback_error) = delete_credential_secret(&reference).await {
+                tracing::error!(%rollback_error, "failed to remove a newly assigned credential after runtime reload failed");
+            }
+            state
+                .ai_factory
+                .remove_environment(&credential_environment_key(reference.id).into());
+        }
+        return Err(error);
+    }
     Ok(Json(reference))
 }
 
@@ -445,16 +495,61 @@ async fn delete_credential(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    if state.ai_runtime.selection().is_some() {
+        ensure_model_reload_allowed(&state).await?;
+    }
     let reference = state.database.credential_reference(id).await?;
-    delete_credential_secret(&reference)
+    let previous_secret = load_credential_secret_optional(&reference)
         .await
         .map_err(|error| {
             ApiError::unavailable("credential_store_unavailable", error.to_string())
         })?;
-    state.database.delete_credential_reference(id).await?;
     state
         .ai_factory
         .remove_environment(&credential_environment_key(id).into());
+    if let Err(error) = reload_selected_model(&state).await {
+        if let Some(previous_secret) = previous_secret {
+            state.ai_factory.set_environment(
+                credential_environment_key(id).into(),
+                previous_secret.into(),
+            );
+        }
+        return Err(error);
+    }
+    if previous_secret.is_some()
+        && let Err(error) = delete_credential_secret(&reference).await
+    {
+        if let Some(previous_secret) = previous_secret.as_ref() {
+            state.ai_factory.set_environment(
+                credential_environment_key(id).into(),
+                previous_secret.clone().into(),
+            );
+        }
+        if let Err(reload_error) = reload_selected_model(&state).await {
+            tracing::error!(%reload_error, "failed to restore the active runtime after credential deletion failed");
+        }
+        return Err(ApiError::unavailable(
+            "credential_store_unavailable",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = state.database.delete_credential_reference(id).await {
+        if let Some(previous_secret) = previous_secret {
+            if let Err(restore_error) =
+                store_credential_secret(&reference, previous_secret.clone()).await
+            {
+                tracing::error!(%restore_error, "failed to restore a credential after deleting its reference failed");
+            }
+            state.ai_factory.set_environment(
+                credential_environment_key(id).into(),
+                previous_secret.into(),
+            );
+        }
+        if let Err(reload_error) = reload_selected_model(&state).await {
+            tracing::error!(%reload_error, "failed to restore the active runtime after deleting a credential reference failed");
+        }
+        return Err(error.into());
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -721,10 +816,10 @@ async fn import_package(
     preflight_package_destination(&state.database, workspace_id, &package).await?;
     let bytes = serde_json::to_vec(&package)
         .map_err(|error| ApiError::invalid(format!("package serialization failed: {error}")))?;
+    let mut transaction = state.database.begin_package_import().await?;
     let mut persona_ids = BTreeMap::new();
     for persona in &package.personas {
-        let created = state
-            .database
+        let created_id = transaction
             .create_persona(NewPersona {
                 workspace_id,
                 name: persona.name.clone(),
@@ -732,12 +827,11 @@ async fn import_package(
                 system_prompt: persona.system_prompt.clone(),
             })
             .await?;
-        persona_ids.insert(persona.id, created.id);
+        persona_ids.insert(persona.id, created_id);
     }
     let mut skill_ids = BTreeMap::new();
     for skill in &package.skills {
-        let created = state
-            .database
+        let created_id = transaction
             .create_skill(NewSkill {
                 workspace_id,
                 slug: skill.slug.clone(),
@@ -747,13 +841,12 @@ async fn import_package(
                 permission_manifest: skill.permission_manifest.clone(),
             })
             .await?;
-        skill_ids.insert(skill.id, created.id);
+        skill_ids.insert(skill.id, created_id);
     }
     let mut agent_ids = BTreeMap::new();
     let mut mcp_server_ids = BTreeMap::new();
     for server in &package.mcp_servers {
-        let created = state
-            .database
+        let created_id = transaction
             .create_mcp_server(NewMcpServer {
                 workspace_id,
                 name: server.name.clone(),
@@ -766,12 +859,11 @@ async fn import_package(
                 enabled: false,
             })
             .await?;
-        mcp_server_ids.insert(server.id, created.id);
+        mcp_server_ids.insert(server.id, created_id);
     }
     let mut remote_agent_ids = BTreeMap::new();
     for remote in &package.remote_agents {
-        let created = state
-            .database
+        let created_id = transaction
             .create_remote_agent(NewRemoteAgent {
                 workspace_id,
                 name: remote.name.clone(),
@@ -780,11 +872,10 @@ async fn import_package(
                 enabled: false,
             })
             .await?;
-        remote_agent_ids.insert(remote.id, created.id);
+        remote_agent_ids.insert(remote.id, created_id);
     }
     for agent in &package.agents {
-        let created = state
-            .database
+        let created_id = transaction
             .create_agent_profile(NewAgentProfile {
                 workspace_id,
                 persona_id: agent
@@ -816,7 +907,7 @@ async fn import_package(
                     .collect(),
             })
             .await?;
-        agent_ids.insert(agent.id, created.id);
+        agent_ids.insert(agent.id, created_id);
     }
     let mut workflow_ids = BTreeMap::new();
     let mut remaining = package.workflows.clone();
@@ -834,8 +925,7 @@ async fn import_package(
         let workflow = remaining.remove(position);
         let nodes =
             remap_workflow_nodes(workflow.nodes, &agent_ids, &remote_agent_ids, &workflow_ids)?;
-        let created = state
-            .database
+        let created_id = transaction
             .create_workflow(NewWorkflow {
                 workspace_id,
                 name: workflow.name,
@@ -844,7 +934,7 @@ async fn import_package(
                 nodes,
             })
             .await?;
-        workflow_ids.insert(workflow.id, created.id);
+        workflow_ids.insert(workflow.id, created_id);
     }
     let mut credential_ids = BTreeMap::new();
     let mut credentials_requiring_values = Vec::new();
@@ -855,8 +945,7 @@ async fn import_package(
             let credential_id = if let Some(id) = credential_ids.get(&credential_key) {
                 *id
             } else {
-                let credential = state
-                    .database
+                let credential = transaction
                     .create_credential_reference(NewCredentialReference {
                         workspace_id,
                         name: variable.credential_name.clone(),
@@ -871,8 +960,7 @@ async fn import_package(
                 credential_id,
             });
         }
-        state
-            .database
+        transaction
             .create_environment(NewEnvironment {
                 workspace_id,
                 name: environment.name.clone(),
@@ -885,8 +973,7 @@ async fn import_package(
         let content = STANDARD.decode(&artifact.content_base64).map_err(|error| {
             ApiError::invalid(format!("package artifact is not base64: {error}"))
         })?;
-        state
-            .database
+        transaction
             .create_artifact(NewArtifact {
                 workspace_id,
                 name: artifact.metadata.name.clone(),
@@ -909,8 +996,7 @@ async fn import_package(
         "artifacts": package.artifacts.len(),
         "credentialsRequiringValues": credentials_requiring_values.len(),
     });
-    let operation_id = state
-        .database
+    let operation_id = transaction
         .record_package_operation(
             workspace_id,
             "import",
@@ -920,6 +1006,7 @@ async fn import_package(
             None,
         )
         .await?;
+    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
         Json(ImportPackageResponse {

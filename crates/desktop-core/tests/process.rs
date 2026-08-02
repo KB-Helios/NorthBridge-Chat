@@ -6,7 +6,9 @@ use std::{
     time::Duration,
 };
 
-use northbridge_domain::ReadyEvent;
+use northbridge_core_api::custom_local_model_selection;
+use northbridge_domain::{DESKTOP_SETTINGS_SCOPE, MODEL_SELECTION_SETTING_KEY, ReadyEvent};
+use northbridge_storage::Database;
 use tempfile::TempDir;
 use url::Url;
 
@@ -65,6 +67,50 @@ fn launches_on_an_ephemeral_loopback_port_and_enforces_authentication() {
     assert!(accepted.starts_with("HTTP/1.1 202 Accepted"));
     let status = wait_for_exit(&mut guard.0);
     assert!(status.success(), "desktop-core exited with {status}");
+}
+
+#[test]
+fn emits_ready_before_warming_a_missing_persisted_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("persisted-model.sqlite");
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let database = Database::connect(&database_path).await.unwrap();
+        let selection = custom_local_model_selection("missing-persisted-model.gguf").unwrap();
+        database
+            .set_json_setting(
+                DESKTOP_SETTINGS_SCOPE,
+                MODEL_SELECTION_SETTING_KEY,
+                &serde_json::to_value(selection).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_desktop-core"))
+        .arg("--database")
+        .arg(&database_path)
+        .env("NORTHBRIDGE_SESSION_TOKEN", TEST_TOKEN)
+        .env("NORTHBRIDGE_CONTROL_TOKEN", TEST_CONTROL_TOKEN)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut guard = ProcessGuard(child);
+    let ready = read_ready(stdout, &mut guard, &directory);
+    let url = Url::parse(&ready.address).unwrap();
+
+    let health = http_get(&url, "/v1/health", Some(TEST_TOKEN));
+    assert!(health.starts_with("HTTP/1.1 200 OK"));
+    let accepted = http_request(
+        &url,
+        "POST",
+        "/v1/runtime/shutdown",
+        Some(TEST_TOKEN),
+        Some(TEST_CONTROL_TOKEN),
+    );
+    assert!(accepted.starts_with("HTTP/1.1 202 Accepted"));
+    assert!(wait_for_exit(&mut guard.0).success());
 }
 
 fn read_ready(
