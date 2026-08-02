@@ -17,6 +17,8 @@ use uuid::Uuid;
 use crate::{auth::AuthenticatedPrincipal, error::ApiError, routes::ApiState};
 
 const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const MAX_LOGIN_EMAIL_BYTES: usize = 320;
+const MAX_PASSWORD_BYTES: usize = 1024;
 
 pub(crate) fn collaboration_routes() -> Router<ApiState> {
     Router::new()
@@ -94,16 +96,19 @@ async fn login(
     State(state): State<ApiState>,
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    validate_login_input(&request)?;
     let lookup = state.database.team_user_with_password(&request.email).await;
     let (user, hash) = match lookup {
         Ok(value) => value,
         Err(StorageError::NotFound { .. }) => {
+            consume_dummy_password_check(request.password).await?;
             audit_login(&state, "denied").await;
             return Err(ApiError::unauthorized());
         }
         Err(error) => return Err(error.into()),
     };
-    if !user.active || !verify_password(request.password, hash).await? {
+    let password_valid = verify_password(request.password, hash).await?;
+    if !user.active || !password_valid {
         audit_login(&state, "denied").await;
         return Err(ApiError::unauthorized());
     }
@@ -385,8 +390,33 @@ async fn verify_password(password: String, encoded: String) -> Result<bool, ApiE
     .map_err(|error| ApiError::invalid(format!("password verification task failed: {error}")))?
 }
 
+async fn consume_dummy_password_check(password: String) -> Result<(), ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let salt = SaltString::encode_b64(b"northbridge-login-dummy")
+            .map_err(|error| ApiError::invalid(format!("dummy password salt failed: {error}")))?;
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|_| ())
+            .map_err(|error| ApiError::invalid(format!("dummy password check failed: {error}")))
+    })
+    .await
+    .map_err(|error| ApiError::invalid(format!("dummy password task failed: {error}")))?
+}
+
+fn validate_login_input(request: &LoginRequest) -> Result<(), ApiError> {
+    if request.email.trim().is_empty() || request.email.len() > MAX_LOGIN_EMAIL_BYTES {
+        return Err(ApiError::invalid(
+            "login email must contain between 1 and 320 bytes",
+        ));
+    }
+    if request.password.len() > MAX_PASSWORD_BYTES {
+        return Err(ApiError::invalid("login password cannot exceed 1 KiB"));
+    }
+    Ok(())
+}
+
 fn validate_password(password: &str) -> Result<(), ApiError> {
-    if password.chars().count() < 12 || password.len() > 1024 {
+    if password.chars().count() < 12 || password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::invalid(
             "password must contain between 12 characters and 1 KiB",
         ));

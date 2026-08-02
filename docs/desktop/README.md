@@ -86,7 +86,7 @@ See [implementation-status.md](implementation-status.md) for the live boundary.
 - SQLite and ordinary desktop operations never pass through agentgateway.
 - All chat and embedding traffic does pass through agentgateway; `desktop-core` never calls mistral.rs directly.
 - MCP, A2A, and media-provider traffic also passes through agentgateway; upstream authorization headers are reconstructed from OS-vault-backed environment values.
-- Secret values never enter SQLite, package exports, generated gateway YAML, or API responses.
+- Long-lived provider secrets never enter SQLite, package exports, generated gateway YAML, or API responses. The per-launch loopback gateway credential exists only in a restricted ephemeral config and is redacted from logs and errors.
 - Dense snapshots are disposable. SQLite documents, chunks, embeddings, and the dense journal are authoritative.
 - Workflow transforms execute in a restricted deterministic worker with no shell, filesystem, or network access. External Tool and A2A attempts interrupted at the crash boundary become `unknown_outcome` instead of being replayed.
 

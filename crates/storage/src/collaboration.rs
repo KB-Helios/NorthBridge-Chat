@@ -290,13 +290,7 @@ impl Database {
                 return Ok(policy.effect == "allow" && role.rank() >= policy.minimum_role.rank());
             }
         }
-        let required = if path.starts_with("/v1/team/") || path.starts_with("/v1/audit/") {
-            TeamRole::Admin
-        } else if method.eq_ignore_ascii_case("GET") {
-            TeamRole::Viewer
-        } else {
-            TeamRole::Member
-        };
+        let required = default_required_role(method, path);
         Ok(role.rank() >= required.rank())
     }
 
@@ -539,6 +533,35 @@ impl Database {
         .await?;
         rows.iter().map(sync_change_from_row).collect()
     }
+}
+
+fn default_required_role(method: &str, path: &str) -> TeamRole {
+    if path.starts_with("/v1/team/") || path.starts_with("/v1/audit/") {
+        return TeamRole::Admin;
+    }
+    if !method.eq_ignore_ascii_case("GET") && is_sensitive_workspace_mutation(path) {
+        return TeamRole::Admin;
+    }
+    if method.eq_ignore_ascii_case("GET") {
+        TeamRole::Viewer
+    } else {
+        TeamRole::Member
+    }
+}
+
+fn is_sensitive_workspace_mutation(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/v1/models/",
+        "/v1/mcp/servers",
+        "/v1/remote-agents",
+        "/v1/credentials",
+        "/v1/environments",
+        "/v1/media/providers",
+        "/v1/packages/",
+    ];
+    PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+        || (path.starts_with("/v1/knowledge/")
+            && (path.contains("/documents/import") || path.contains("/watch-roots")))
 }
 
 fn team_user_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<TeamUser> {

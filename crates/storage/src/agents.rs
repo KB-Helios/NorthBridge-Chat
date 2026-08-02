@@ -584,6 +584,34 @@ impl Database {
         Ok(profiles)
     }
 
+    pub async fn create_mcp_server(&self, input: NewMcpServer) -> Result<McpServer> {
+        validate_mcp_server(&input)?;
+        let id = Uuid::now_v7();
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO mcp_servers (
+                 id, workspace_id, name, transport, endpoint, command, args_json, env_refs_json,
+                 openapi_schema, enabled, config_revision, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(input.workspace_id.to_string())
+        .bind(input.name.trim())
+        .bind(input.transport.as_str())
+        .bind(input.endpoint.as_deref())
+        .bind(input.command.as_deref())
+        .bind(serde_json::to_string(&input.args).map_err(json_input("MCP arguments"))?)
+        .bind(input.environment_references.to_string())
+        .bind(input.openapi_schema.as_deref())
+        .bind(i64::from(input.enabled))
+        .bind(now)
+        .bind(now)
+        .execute(self.pool())
+        .await
+        .map_err(map_unique("an MCP server with this name already exists"))?;
+        self.mcp_server(id).await
+    }
+
     pub async fn upsert_mcp_server(&self, input: NewMcpServer) -> Result<McpServer> {
         validate_mcp_server(&input)?;
         let existing = sqlx::query_scalar::<_, String>(
@@ -1236,6 +1264,33 @@ impl Database {
         .rows_affected();
         transaction.commit().await?;
         Ok(calls + runs)
+    }
+
+    pub async fn create_remote_agent(&self, input: NewRemoteAgent) -> Result<RemoteAgent> {
+        validate_label("remote agent name", &input.name, 120)?;
+        validate_remote_url(&input.upstream_url)?;
+        let id = Uuid::now_v7();
+        let gateway_path = format!("/a2a/{id}");
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO remote_agents (
+                 id, workspace_id, name, upstream_url, gateway_path, auth_environment_key,
+                 enabled, created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(input.workspace_id.to_string())
+        .bind(input.name.trim())
+        .bind(input.upstream_url.trim())
+        .bind(&gateway_path)
+        .bind(input.auth_environment_key.as_deref())
+        .bind(i64::from(input.enabled))
+        .bind(now)
+        .bind(now)
+        .execute(self.pool())
+        .await
+        .map_err(map_unique("a remote agent with this name already exists"))?;
+        self.remote_agent(id).await
     }
 
     pub async fn upsert_remote_agent(&self, input: NewRemoteAgent) -> Result<RemoteAgent> {

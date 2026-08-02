@@ -1,10 +1,11 @@
 use northbridge_domain::{
     AgentRunStatus, AiProvider, ArtifactKind, CrewMember, CrewRunStatus, DEFAULT_WORKSPACE_ID,
     DESKTOP_SETTINGS_SCOPE, GenerationStatus, KnowledgeSourceKind, MODEL_SELECTION_SETTING_KEY,
-    ManagedModel, ManagedModelSource, ManagedModelStatus, MessagePartKind, MessageRole,
-    ModelLoadProfile, ModelQuantization, ModelSelection, NewMessage, NewMessagePart,
-    ShadowSuggestionStatus, TeamRole, ToolCallStatus, ToolPolicyMode, TransformOperation,
-    WorkflowNode, WorkflowNodeKind, WorkflowNodeRunStatus, WorkflowRunStatus,
+    ManagedModel, ManagedModelSource, ManagedModelStatus, McpTransport, MediaJobStatus,
+    MediaModality, MessagePartKind, MessageRole, ModelLoadProfile, ModelQuantization,
+    ModelSelection, NewMessage, NewMessagePart, ShadowSuggestionStatus, TeamRole, ToolCallStatus,
+    ToolPolicyMode, TransformOperation, WorkflowNode, WorkflowNodeKind, WorkflowNodeRunStatus,
+    WorkflowRunStatus,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -13,8 +14,9 @@ use uuid::Uuid;
 
 use crate::{
     Database, NewAgentProfile, NewAgentRun, NewArtifact, NewCrew, NewCrewRun, NewKnowledgeChunk,
-    NewKnowledgeDocument, NewKnowledgeStack, NewRemoteAgent, NewShadowSubscription, NewSyncChange,
-    NewTeamPolicy, NewTeamUser, NewToolIntent, NewWorkflow, NewWorkflowRun, StorageError,
+    NewKnowledgeDocument, NewKnowledgeStack, NewMcpServer, NewMediaProvider, NewRemoteAgent,
+    NewShadowSubscription, NewSyncChange, NewTeamPolicy, NewTeamUser, NewToolIntent, NewWorkflow,
+    NewWorkflowRun, StorageError,
 };
 
 async fn test_database() -> (Database, TempDir) {
@@ -153,6 +155,149 @@ async fn deduplicates_and_verifies_content_addressed_artifacts() {
 }
 
 #[tokio::test]
+async fn media_job_terminal_states_cannot_be_overwritten() {
+    let (database, _directory) = test_database().await;
+    let provider = database
+        .create_media_provider(NewMediaProvider {
+            workspace_id: workspace_id(),
+            name: "Image provider".to_string(),
+            modality: MediaModality::Image,
+            upstream_url: "https://media.example.test".to_string(),
+            credential_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let completed = database
+        .create_media_job(
+            provider.id,
+            workspace_id(),
+            "draw a bridge",
+            &json!({ "prompt": "draw a bridge" }),
+        )
+        .await
+        .unwrap();
+    database
+        .set_media_job_state(completed.id, MediaJobStatus::Running, None, None, None)
+        .await
+        .unwrap();
+    database
+        .set_media_job_state(
+            completed.id,
+            MediaJobStatus::Completed,
+            Some(&json!({ "ok": true })),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        database
+            .set_media_job_state(completed.id, MediaJobStatus::Cancelled, None, None, None,)
+            .await,
+        Err(StorageError::Conflict(_))
+    ));
+    assert_eq!(
+        database.media_job(completed.id).await.unwrap().status,
+        MediaJobStatus::Completed
+    );
+
+    let cancelled = database
+        .create_media_job(
+            provider.id,
+            workspace_id(),
+            "draw a cancelled bridge",
+            &json!({ "prompt": "draw a cancelled bridge" }),
+        )
+        .await
+        .unwrap();
+    database
+        .set_media_job_state(cancelled.id, MediaJobStatus::Cancelled, None, None, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        database
+            .set_media_job_state(cancelled.id, MediaJobStatus::Running, None, None, None)
+            .await,
+        Err(StorageError::Conflict(_))
+    ));
+    assert_eq!(
+        database.media_job(cancelled.id).await.unwrap().status,
+        MediaJobStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn create_only_integrations_never_overwrite_named_records() {
+    let (database, _directory) = test_database().await;
+    let existing_server = database
+        .create_mcp_server(NewMcpServer {
+            workspace_id: workspace_id(),
+            name: "trusted-tools".to_string(),
+            transport: McpTransport::Stdio,
+            endpoint: None,
+            command: Some("trusted-tool.exe".to_string()),
+            args: Vec::new(),
+            environment_references: json!({}),
+            openapi_schema: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        database
+            .create_mcp_server(NewMcpServer {
+                workspace_id: workspace_id(),
+                name: "TRUSTED-TOOLS".to_string(),
+                transport: McpTransport::Stdio,
+                endpoint: None,
+                command: Some("replacement.exe".to_string()),
+                args: Vec::new(),
+                environment_references: json!({}),
+                openapi_schema: None,
+                enabled: false,
+            })
+            .await,
+        Err(StorageError::Conflict(_))
+    ));
+    let persisted_server = database.mcp_server(existing_server.id).await.unwrap();
+    assert_eq!(
+        persisted_server.command.as_deref(),
+        Some("trusted-tool.exe")
+    );
+    assert!(persisted_server.enabled);
+
+    let existing_remote = database
+        .create_remote_agent(NewRemoteAgent {
+            workspace_id: workspace_id(),
+            name: "trusted-remote".to_string(),
+            upstream_url: "https://trusted.example.test".to_string(),
+            auth_environment_key: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        database
+            .create_remote_agent(NewRemoteAgent {
+                workspace_id: workspace_id(),
+                name: "TRUSTED-REMOTE".to_string(),
+                upstream_url: "https://replacement.example.test".to_string(),
+                auth_environment_key: None,
+                enabled: false,
+            })
+            .await,
+        Err(StorageError::Conflict(_))
+    ));
+    let persisted_remote = database.remote_agent(existing_remote.id).await.unwrap();
+    assert_eq!(
+        persisted_remote.upstream_url,
+        "https://trusted.example.test"
+    );
+    assert!(persisted_remote.enabled);
+}
+
+#[tokio::test]
 async fn enforces_team_policy_audit_chain_and_idempotent_sync_conflicts() {
     let (database, _directory) = test_database().await;
     let user = database
@@ -177,6 +322,60 @@ async fn enforces_team_policy_audit_chain_and_idempotent_sync_conflicts() {
             .unwrap()
             .id,
         user.id
+    );
+    assert!(
+        database
+            .team_policy_allows(
+                workspace_id(),
+                TeamRole::Member,
+                "POST",
+                "/v1/conversations",
+            )
+            .await
+            .unwrap()
+    );
+    for path in [
+        "/v1/models/imports",
+        "/v1/mcp/servers",
+        "/v1/packages/import",
+        "/v1/knowledge/stacks/example/documents/import",
+        "/v1/knowledge/stacks/example/watch-roots",
+    ] {
+        assert!(
+            !database
+                .team_policy_allows(workspace_id(), TeamRole::Member, "POST", path)
+                .await
+                .unwrap(),
+            "member unexpectedly received sensitive mutation access to {path}"
+        );
+    }
+    assert!(
+        database
+            .team_policy_allows(workspace_id(), TeamRole::Viewer, "GET", "/v1/mcp/servers",)
+            .await
+            .unwrap()
+    );
+    database
+        .create_team_policy(NewTeamPolicy {
+            workspace_id: workspace_id(),
+            name: "Delegate model imports".to_string(),
+            method: "POST".to_string(),
+            path_prefix: "/v1/models/imports".to_string(),
+            minimum_role: TeamRole::Member,
+            effect: "allow".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        database
+            .team_policy_allows(
+                workspace_id(),
+                TeamRole::Member,
+                "POST",
+                "/v1/models/imports",
+            )
+            .await
+            .unwrap()
     );
     database
         .create_team_policy(NewTeamPolicy {

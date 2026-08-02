@@ -65,7 +65,7 @@ This file separates implemented runtime behavior from architectural intent. Auto
 - [x] Restricted deterministic transform worker with no shell, filesystem, or network access and explicit input/output limits.
 - [x] Content-addressed Forge artifacts with SHA-256 verification, revisions, deduplication, downloads, and garbage collection.
 - [x] Image, audio, and video provider jobs routed only through authenticated agentgateway routes; URL-only provider responses are rejected.
-- [x] OS credential-vault integration. SQLite, generated gateway YAML, logs, audit entries, and exported packages contain references rather than secret values.
+- [x] OS credential-vault integration. SQLite, logs, audit entries, exported packages, and generated gateway provider configuration contain references rather than long-lived secret values; the per-launch loopback credential is restricted to the ephemeral gateway config and redacted from logs and errors.
 - [x] Scoped environments plus validated, versioned package export/import with ID remapping, credential placeholders, and artifact integrity checks.
 - [x] Platform Studio UI and typed desktop transport for workflows, approvals, artifacts, credentials, environments, media, and packages.
 

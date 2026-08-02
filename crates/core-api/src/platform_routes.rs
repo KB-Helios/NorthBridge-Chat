@@ -16,7 +16,7 @@ use northbridge_domain::{
     WorkflowNodeKind, WorkflowRun, credential_environment_key,
 };
 use northbridge_storage::{
-    NewAgentProfile, NewArtifact, NewCredentialReference, NewEnvironment, NewMcpServer,
+    Database, NewAgentProfile, NewArtifact, NewCredentialReference, NewEnvironment, NewMcpServer,
     NewMediaProvider, NewPersona, NewRemoteAgent, NewSkill, NewWorkflow,
 };
 use serde::{Deserialize, Serialize};
@@ -718,6 +718,7 @@ async fn import_package(
 ) -> Result<(StatusCode, Json<ImportPackageResponse>), ApiError> {
     validate_package(&package)?;
     let workspace_id = workspace_id()?;
+    preflight_package_destination(&state.database, workspace_id, &package).await?;
     let bytes = serde_json::to_vec(&package)
         .map_err(|error| ApiError::invalid(format!("package serialization failed: {error}")))?;
     let mut persona_ids = BTreeMap::new();
@@ -753,7 +754,7 @@ async fn import_package(
     for server in &package.mcp_servers {
         let created = state
             .database
-            .upsert_mcp_server(NewMcpServer {
+            .create_mcp_server(NewMcpServer {
                 workspace_id,
                 name: server.name.clone(),
                 transport: server.transport,
@@ -762,7 +763,7 @@ async fn import_package(
                 args: server.args.clone(),
                 environment_references: json!({}),
                 openapi_schema: server.openapi_schema.clone(),
-                enabled: server.enabled,
+                enabled: false,
             })
             .await?;
         mcp_server_ids.insert(server.id, created.id);
@@ -771,12 +772,12 @@ async fn import_package(
     for remote in &package.remote_agents {
         let created = state
             .database
-            .upsert_remote_agent(NewRemoteAgent {
+            .create_remote_agent(NewRemoteAgent {
                 workspace_id,
                 name: remote.name.clone(),
                 upstream_url: remote.upstream_url.clone(),
                 auth_environment_key: remote.auth_environment_key.clone(),
-                enabled: remote.enabled,
+                enabled: false,
             })
             .await?;
         remote_agent_ids.insert(remote.id, created.id);
@@ -934,6 +935,104 @@ async fn import_package(
     ))
 }
 
+async fn preflight_package_destination(
+    database: &Database,
+    workspace_id: Uuid,
+    package: &NorthbridgePackage,
+) -> Result<(), ApiError> {
+    let (
+        personas,
+        skills,
+        agents,
+        mcp_servers,
+        remote_agents,
+        workflows,
+        environments,
+        credentials,
+    ) = tokio::try_join!(
+        database.list_personas(workspace_id),
+        database.list_skills(workspace_id),
+        database.list_agent_profiles(workspace_id),
+        database.list_mcp_servers(workspace_id),
+        database.list_remote_agents(workspace_id),
+        database.list_workflows(workspace_id),
+        database.list_environments(workspace_id),
+        database.list_credential_references(workspace_id),
+    )?;
+    reject_destination_conflicts(
+        "persona",
+        normalized_keys(package.personas.iter().map(|value| value.name.as_str())),
+        normalized_keys(personas.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "skill",
+        normalized_keys(package.skills.iter().map(|value| value.slug.as_str())),
+        normalized_keys(skills.iter().map(|value| value.slug.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "agent",
+        normalized_keys(package.agents.iter().map(|value| value.name.as_str())),
+        normalized_keys(agents.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "MCP server",
+        normalized_keys(package.mcp_servers.iter().map(|value| value.name.as_str())),
+        normalized_keys(mcp_servers.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "remote agent",
+        normalized_keys(
+            package
+                .remote_agents
+                .iter()
+                .map(|value| value.name.as_str()),
+        ),
+        normalized_keys(remote_agents.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "workflow",
+        normalized_keys(package.workflows.iter().map(|value| value.name.as_str())),
+        normalized_keys(workflows.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "environment",
+        normalized_keys(package.environments.iter().map(|value| value.name.as_str())),
+        normalized_keys(environments.iter().map(|value| value.name.as_str())),
+    )?;
+    reject_destination_conflicts(
+        "credential reference",
+        normalized_keys(
+            package
+                .environments
+                .iter()
+                .flat_map(|environment| environment.variables.iter())
+                .map(|variable| variable.credential_name.as_str()),
+        ),
+        normalized_keys(credentials.iter().map(|value| value.name.as_str())),
+    )
+}
+
+fn normalized_keys<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect()
+}
+
+fn reject_destination_conflicts(
+    entity: &str,
+    incoming: BTreeSet<String>,
+    existing: BTreeSet<String>,
+) -> Result<(), ApiError> {
+    if let Some(key) = incoming.intersection(&existing).next() {
+        return Err(ApiError::conflict(
+            "package_destination_conflict",
+            format!("package {entity} '{key}' already exists in the destination workspace"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_package(package: &NorthbridgePackage) -> Result<(), ApiError> {
     if package.schema_version != 1 {
         return Err(ApiError::invalid("unsupported NorthBridge package schema"));
@@ -954,36 +1053,58 @@ fn validate_package(package: &NorthbridgePackage) -> Result<(), ApiError> {
     if total > 2048 {
         return Err(ApiError::invalid("package contains too many records"));
     }
-    let persona_ids = package
-        .personas
-        .iter()
-        .map(|persona| persona.id)
-        .collect::<BTreeSet<_>>();
-    let skill_ids = package
-        .skills
-        .iter()
-        .map(|skill| skill.id)
-        .collect::<BTreeSet<_>>();
-    let mcp_server_ids = package
-        .mcp_servers
-        .iter()
-        .map(|server| server.id)
-        .collect::<BTreeSet<_>>();
-    let remote_agent_ids = package
-        .remote_agents
-        .iter()
-        .map(|agent| agent.id)
-        .collect::<BTreeSet<_>>();
-    let agent_ids = package
-        .agents
-        .iter()
-        .map(|agent| agent.id)
-        .collect::<BTreeSet<_>>();
-    let workflow_ids = package
-        .workflows
-        .iter()
-        .map(|workflow| workflow.id)
-        .collect::<BTreeSet<_>>();
+    validate_unique_package_keys(
+        "persona",
+        package.personas.iter().map(|value| value.name.as_str()),
+    )?;
+    validate_unique_package_keys(
+        "skill",
+        package.skills.iter().map(|value| value.slug.as_str()),
+    )?;
+    validate_unique_package_keys(
+        "agent",
+        package.agents.iter().map(|value| value.name.as_str()),
+    )?;
+    validate_unique_package_keys(
+        "MCP server",
+        package.mcp_servers.iter().map(|value| value.name.as_str()),
+    )?;
+    validate_unique_package_keys(
+        "remote agent",
+        package
+            .remote_agents
+            .iter()
+            .map(|value| value.name.as_str()),
+    )?;
+    validate_unique_package_keys(
+        "workflow",
+        package.workflows.iter().map(|value| value.name.as_str()),
+    )?;
+    let persona_ids =
+        collect_unique_package_ids("persona", package.personas.iter().map(|persona| persona.id))?;
+    let skill_ids =
+        collect_unique_package_ids("skill", package.skills.iter().map(|skill| skill.id))?;
+    let mcp_server_ids = collect_unique_package_ids(
+        "MCP server",
+        package.mcp_servers.iter().map(|server| server.id),
+    )?;
+    let remote_agent_ids = collect_unique_package_ids(
+        "remote agent",
+        package.remote_agents.iter().map(|agent| agent.id),
+    )?;
+    let agent_ids =
+        collect_unique_package_ids("agent", package.agents.iter().map(|agent| agent.id))?;
+    let workflow_ids = collect_unique_package_ids(
+        "workflow",
+        package.workflows.iter().map(|workflow| workflow.id),
+    )?;
+    let _artifact_ids = collect_unique_package_ids(
+        "artifact",
+        package
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.metadata.id),
+    )?;
     for agent in &package.agents {
         if agent
             .persona_id
@@ -1052,6 +1173,37 @@ fn validate_package(package: &NorthbridgePackage) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+fn validate_unique_package_keys<'a>(
+    entity: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ApiError> {
+    let mut keys = BTreeSet::new();
+    for value in values {
+        let key = value.trim().to_ascii_lowercase();
+        if key.is_empty() || !keys.insert(key) {
+            return Err(ApiError::invalid(format!(
+                "package contains an empty or duplicate {entity} name"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_unique_package_ids(
+    entity: &str,
+    ids: impl IntoIterator<Item = Uuid>,
+) -> Result<BTreeSet<Uuid>, ApiError> {
+    let mut unique = BTreeSet::new();
+    for id in ids {
+        if !unique.insert(id) {
+            return Err(ApiError::invalid(format!(
+                "package contains duplicate {entity} ids"
+            )));
+        }
+    }
+    Ok(unique)
 }
 
 fn validate_workflow_package_refs(

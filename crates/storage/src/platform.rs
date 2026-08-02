@@ -469,23 +469,37 @@ impl Database {
         artifact_id: Option<Uuid>,
         error: Option<&str>,
     ) -> Result<MediaJob> {
-        let changed = sqlx::query(
+        let eligible_state = match status {
+            MediaJobStatus::Queued => "status = 'queued'",
+            MediaJobStatus::Running => "status = 'queued'",
+            MediaJobStatus::Completed => "status = 'running'",
+            MediaJobStatus::Failed | MediaJobStatus::Cancelled => "status IN ('queued', 'running')",
+            MediaJobStatus::UnknownOutcome => "status = 'running'",
+        };
+        let statement = format!(
             "UPDATE media_jobs SET status = ?, response_json = ?, artifact_id = ?, last_error = ?,
-                    updated_at_ms = ? WHERE id = ?",
-        )
-        .bind(status.as_str())
-        .bind(optional_json_string(response, "media response")?)
-        .bind(artifact_id.map(|id| id.to_string()))
-        .bind(error)
-        .bind(now_ms())
-        .bind(id.to_string())
-        .execute(self.pool())
-        .await?
-        .rows_affected();
+                    updated_at_ms = ? WHERE id = ? AND {eligible_state}"
+        );
+        let changed = sqlx::query(&statement)
+            .bind(status.as_str())
+            .bind(optional_json_string(response, "media response")?)
+            .bind(artifact_id.map(|id| id.to_string()))
+            .bind(error)
+            .bind(now_ms())
+            .bind(id.to_string())
+            .execute(self.pool())
+            .await?
+            .rows_affected();
         if changed == 0 {
-            return Err(StorageError::NotFound {
-                entity: "media job",
-            });
+            let current = self.media_job(id).await?;
+            if current.status == status {
+                return Ok(current);
+            }
+            return Err(StorageError::Conflict(format!(
+                "media job cannot transition from {} to {}",
+                current.status.as_str(),
+                status.as_str()
+            )));
         }
         self.media_job(id).await
     }

@@ -168,6 +168,7 @@ impl MediaCoordinator {
         let task_cancellation = cancellation.clone();
         let coordinator = self.clone();
         let id = job.id;
+        let mut tasks = self.inner.tasks.lock().await;
         let handle = tokio::spawn(async move {
             if let Err(error) = coordinator.execute_job(id, task_cancellation).await {
                 let status = if matches!(error, MediaError::Cancelled) {
@@ -183,13 +184,14 @@ impl MediaCoordinator {
             }
             coordinator.inner.tasks.lock().await.remove(&id);
         });
-        self.inner.tasks.lock().await.insert(
+        tasks.insert(
             id,
             MediaTask {
                 cancellation,
                 handle,
             },
         );
+        drop(tasks);
         Ok(job)
     }
 
@@ -247,7 +249,7 @@ impl MediaCoordinator {
             .base_url
             .join(provider.gateway_path.trim_start_matches('/'))
             .map_err(|error| MediaError::Gateway(error.to_string()))?;
-        let response = tokio::select! {
+        let mut response = tokio::select! {
             () = cancellation.cancelled() => return Err(MediaError::Cancelled),
             response = self.inner.client
                 .post(endpoint)
@@ -261,15 +263,9 @@ impl MediaCoordinator {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| MediaError::Provider(error.to_string()))?;
-        if bytes.len() > MAX_MEDIA_RESPONSE_BYTES {
-            return Err(MediaError::Provider(
-                "provider response exceeded 64 MiB".to_string(),
-            ));
-        }
+        let bytes =
+            read_bounded_response_body(&mut response, &cancellation, MAX_MEDIA_RESPONSE_BYTES)
+                .await?;
         if !status.is_success() {
             let detail = String::from_utf8_lossy(&bytes);
             return Err(MediaError::Provider(format!(
@@ -296,11 +292,14 @@ impl MediaCoordinator {
             (content, value, content_type.to_string())
         } else {
             (
-                bytes.to_vec(),
+                bytes,
                 json!({ "contentType": media_type }),
                 media_type.unwrap_or_else(|| infer_media_type(job.modality).to_string()),
             )
         };
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         let artifact = self
             .inner
             .database
@@ -326,6 +325,44 @@ impl MediaCoordinator {
             .await?;
         Ok(())
     }
+}
+
+async fn read_bounded_response_body(
+    response: &mut reqwest::Response,
+    cancellation: &CancellationToken,
+    max_bytes: usize,
+) -> Result<Vec<u8>, MediaError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(MediaError::Provider(format!(
+            "provider response exceeded the {max_bytes}-byte limit"
+        )));
+    }
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity);
+    loop {
+        let chunk = tokio::select! {
+            () = cancellation.cancelled() => return Err(MediaError::Cancelled),
+            chunk = response.chunk() => chunk
+                .map_err(|error| MediaError::Provider(error.to_string()))?,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+            return Err(MediaError::Provider(format!(
+                "provider response exceeded the {max_bytes}-byte limit"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn find_base64_payload(value: &Value) -> Option<&str> {
@@ -358,5 +395,49 @@ const fn infer_media_type(modality: MediaModality) -> &'static str {
         MediaModality::Image => "image/png",
         MediaModality::Audio => "audio/mpeg",
         MediaModality::Video => "video/mp4",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use axum::{
+        Router,
+        body::{Body, Bytes},
+        routing::get,
+    };
+    use futures_util::stream;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_chunked_media_responses_before_buffering_past_the_limit() {
+        let app = Router::new().route(
+            "/",
+            get(|| async {
+                Body::from_stream(stream::iter([
+                    Ok::<_, Infallible>(Bytes::from_static(b"1234")),
+                    Ok::<_, Infallible>(Bytes::from_static(b"5678")),
+                ]))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut response = Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+
+        let error = read_bounded_response_body(&mut response, &CancellationToken::new(), 6)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, MediaError::Provider(message) if message.contains("6-byte limit")));
+        server.abort();
     }
 }

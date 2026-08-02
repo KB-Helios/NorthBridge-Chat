@@ -4,10 +4,13 @@ use async_trait::async_trait;
 use axum::{Router, body::Body};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use northbridge_domain::{DEFAULT_WORKSPACE_ID, EnvironmentVariableRef};
+use northbridge_domain::{
+    DEFAULT_WORKSPACE_ID, EnvironmentVariableRef, McpServer, McpTransport, NorthbridgePackage,
+    RemoteAgent,
+};
 use northbridge_model_manager::{ModelManager, ModelManagerConfig};
 use northbridge_retrieval::{EmbeddingProvider, Result as RetrievalResult};
-use northbridge_storage::{Database, NewCredentialReference, NewEnvironment};
+use northbridge_storage::{Database, NewCredentialReference, NewEnvironment, NewMcpServer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -192,6 +195,30 @@ async fn rejects_requests_without_the_session_token() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = json_body(response).await;
     assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn rejects_malformed_remote_login_inputs_before_password_work() {
+    let (api, _database, _directory) = test_api().await;
+    let router = api.router();
+    for body in [
+        json!({ "email": "", "password": "valid length password" }),
+        json!({ "email": "user@example.com", "password": "x".repeat(1025) }),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/login")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[tokio::test]
@@ -1019,6 +1046,115 @@ async fn round_trips_secretless_packages_with_environment_variable_names_and_art
         .await
         .unwrap();
     assert_eq!(content, b"# Portable");
+}
+
+#[tokio::test]
+async fn package_import_preserves_existing_integrations_and_disables_new_ones() {
+    let (api, database, _directory) = test_api().await;
+    let workspace_id = Uuid::parse_str(DEFAULT_WORKSPACE_ID).unwrap();
+    let existing = database
+        .upsert_mcp_server(NewMcpServer {
+            workspace_id,
+            name: "trusted-tools".to_string(),
+            transport: McpTransport::Stdio,
+            endpoint: None,
+            command: Some("trusted-tool.exe".to_string()),
+            args: vec!["--safe".to_string()],
+            environment_references: json!({}),
+            openapi_schema: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let router = api.router();
+    let collision = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/packages/import",
+            package_with_mcp_server("trusted-tools", "untrusted-tool.exe", true),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+    let unchanged = database.mcp_server(existing.id).await.unwrap();
+    assert_eq!(unchanged.command.as_deref(), Some("trusted-tool.exe"));
+    assert!(unchanged.enabled);
+
+    let imported = router
+        .oneshot(request(
+            "POST",
+            "/v1/packages/import",
+            package_with_mcp_server("imported-tools", "imported-tool.exe", true),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), StatusCode::CREATED);
+    let imported = database
+        .list_mcp_servers(workspace_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|server| server.name == "imported-tools")
+        .unwrap();
+    assert_eq!(imported.command.as_deref(), Some("imported-tool.exe"));
+    assert!(!imported.enabled);
+    let imported_remote = database
+        .list_remote_agents(workspace_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == "imported-tools-remote")
+        .unwrap();
+    assert!(!imported_remote.enabled);
+}
+
+fn package_with_mcp_server(name: &str, command: &str, enabled: bool) -> Value {
+    let workspace_id = Uuid::parse_str(DEFAULT_WORKSPACE_ID).unwrap();
+    serde_json::to_value(NorthbridgePackage {
+        schema_version: 1,
+        name: format!("{name} package"),
+        description: String::new(),
+        personas: Vec::new(),
+        skills: Vec::new(),
+        agents: Vec::new(),
+        mcp_servers: vec![McpServer {
+            id: Uuid::now_v7(),
+            workspace_id,
+            name: name.to_string(),
+            transport: McpTransport::Stdio,
+            endpoint: None,
+            command: Some(command.to_string()),
+            args: Vec::new(),
+            environment_references: json!({}),
+            openapi_schema: None,
+            enabled,
+            config_revision: 1,
+            last_error: None,
+            last_discovered_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }],
+        remote_agents: vec![RemoteAgent {
+            id: Uuid::now_v7(),
+            workspace_id,
+            name: format!("{name}-remote"),
+            upstream_url: "https://remote.example.test".to_string(),
+            gateway_path: "/a2a/imported".to_string(),
+            auth_environment_key: None,
+            enabled,
+            card: None,
+            card_etag: None,
+            last_discovered_at_ms: None,
+            last_error: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }],
+        workflows: Vec::new(),
+        environments: Vec::new(),
+        artifacts: Vec::new(),
+    })
+    .unwrap()
 }
 
 #[tokio::test]
