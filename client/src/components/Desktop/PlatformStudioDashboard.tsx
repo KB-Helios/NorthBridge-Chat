@@ -605,7 +605,10 @@ function Status({ title, status }: { title: string; status: string }) {
 
 function encodeUtf8(value: string): string {
   const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return window.btoa(binary);
+  const chunks: string[] = [];
+  const chunkSize = 32 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
+  }
+  return window.btoa(chunks.join(''));
 }
