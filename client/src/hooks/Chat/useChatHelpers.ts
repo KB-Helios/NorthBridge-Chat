@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { QueryKeys, isAssistantsEndpoint } from 'librechat-data-provider';
+import { isDesktopRuntime } from '@northbridge/desktop-transport';
 import { useRecoilState, useSetRecoilState, useRecoilCallback } from 'recoil';
 import type { TMessage } from 'librechat-data-provider';
 import type { ActiveJobsResponse } from '~/data-provider';
@@ -12,6 +13,7 @@ import { resolveAbortSteerTarget } from '~/utils';
 import useNewConvo from '~/hooks/useNewConvo';
 import { getMessageCacheIds } from './cache';
 import { useAbortCleanup } from './abort';
+import { cancelDesktopGeneration } from '~/desktop/generationRegistry';
 import store from '~/store';
 
 // this to be set somewhere else
@@ -167,6 +169,14 @@ export default function useChatHelpers(index = 0, paramId?: string) {
    * Assistants endpoint has its own abort mechanism via useEventHandlers.abortConversation.
    */
   const stopGenerating = useCallback(async () => {
+    if (isDesktopRuntime()) {
+      try {
+        await cancelDesktopGeneration(index);
+      } catch (error) {
+        console.error('[NorthBridge desktop] Failed to cancel generation:', error);
+      }
+      return;
+    }
     const actualEndpoint = endpointType ?? endpoint;
     const isAssistants = isAssistantsEndpoint(actualEndpoint);
     console.log('[useChatHelpers] stopGenerating called', {
@@ -229,6 +239,7 @@ export default function useChatHelpers(index = 0, paramId?: string) {
       clearAllSubmissions();
     }
   }, [
+    index,
     conversationId,
     endpoint,
     endpointType,

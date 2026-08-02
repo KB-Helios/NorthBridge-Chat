@@ -5,16 +5,52 @@ import type * as t from './types';
 import { setTokenHeader } from './headers-helpers';
 import * as endpoints from './api-endpoints';
 
+export type RequestOverrideMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+export type RequestOverrideResult = { handled: true; data: unknown } | { handled: false };
+export type RequestOverride = (request: {
+  method: RequestOverrideMethod;
+  url: string;
+  data?: unknown;
+  options?: AxiosRequestConfig;
+}) => Promise<RequestOverrideResult>;
+
+let requestOverride: RequestOverride | null = null;
+
+export function setRequestOverride(override: RequestOverride | null): void {
+  requestOverride = override;
+}
+
+async function overridden(
+  method: RequestOverrideMethod,
+  url: string,
+  data?: unknown,
+  options?: AxiosRequestConfig,
+): Promise<RequestOverrideResult> {
+  return requestOverride?.({ method, url, data, options }) ?? { handled: false };
+}
+
 async function _get<T>(url: string, options?: AxiosRequestConfig): Promise<T> {
+  const local = await overridden('GET', url, undefined, options);
+  if (local.handled) {
+    return local.data as T;
+  }
   const response = await axios.get(url, { ...options });
   return response.data;
 }
 
 async function _getResponse<T>(url: string, options?: AxiosRequestConfig): Promise<T> {
+  const local = await overridden('GET', url, undefined, options);
+  if (local.handled) {
+    return local.data as T;
+  }
   return await axios.get(url, { ...options });
 }
 
 async function _post(url: string, data?: any) {
+  const local = await overridden('POST', url, data);
+  if (local.handled) {
+    return local.data;
+  }
   const response = await axios.post(url, JSON.stringify(data), {
     headers: { 'Content-Type': 'application/json' },
   });
@@ -22,6 +58,10 @@ async function _post(url: string, data?: any) {
 }
 
 async function _postMultiPart(url: string, formData: FormData, options?: AxiosRequestConfig) {
+  const local = await overridden('POST', url, formData, options);
+  if (local.handled) {
+    return local.data;
+  }
   const response = await axios.post(url, formData, {
     ...options,
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -30,6 +70,10 @@ async function _postMultiPart(url: string, formData: FormData, options?: AxiosRe
 }
 
 async function _postTTS(url: string, formData: FormData, options?: AxiosRequestConfig) {
+  const local = await overridden('POST', url, formData, options);
+  if (local.handled) {
+    return local.data;
+  }
   const response = await axios.post(url, formData, {
     ...options,
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -39,6 +83,10 @@ async function _postTTS(url: string, formData: FormData, options?: AxiosRequestC
 }
 
 async function _put(url: string, data?: any) {
+  const local = await overridden('PUT', url, data);
+  if (local.handled) {
+    return local.data;
+  }
   const response = await axios.put(url, JSON.stringify(data), {
     headers: { 'Content-Type': 'application/json' },
   });
@@ -46,16 +94,28 @@ async function _put(url: string, data?: any) {
 }
 
 async function _delete<T>(url: string): Promise<T> {
+  const local = await overridden('DELETE', url);
+  if (local.handled) {
+    return local.data as T;
+  }
   const response = await axios.delete(url);
   return response.data;
 }
 
 async function _deleteWithOptions<T>(url: string, options?: AxiosRequestConfig): Promise<T> {
+  const local = await overridden('DELETE', url, options?.data, options);
+  if (local.handled) {
+    return local.data as T;
+  }
   const response = await axios.delete(url, { ...options });
   return response.data;
 }
 
 async function _patch(url: string, data?: any) {
+  const local = await overridden('PATCH', url, data);
+  if (local.handled) {
+    return local.data;
+  }
   const response = await axios.patch(url, JSON.stringify(data), {
     headers: { 'Content-Type': 'application/json' },
   });

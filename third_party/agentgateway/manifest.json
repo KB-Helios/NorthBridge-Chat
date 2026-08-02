@@ -1,0 +1,10 @@
+{
+  "upstreamVersion": "1.4.0",
+  "upstreamCommit": "83c952731ee79b4372e3a031382c4ff419ddfee1",
+  "sourceArchiveUrl": "https://codeload.github.com/agentgateway/agentgateway/zip/83c952731ee79b4372e3a031382c4ff419ddfee1",
+  "sourceArchiveSha256": "77ed4d24e400e419b31e43f6c821f40e4f99da30116a9860aae94c268dabdbe6",
+  "patchSha256": "ed76b16102257e1be036cf99b88d4d9ae42aad1867043bca2ba87e8b124bd1f0",
+  "rustToolchain": "1.97",
+  "securityProfile": "northbridge-loopback-v1",
+  "versionMarker": "northbridge-loopback-v1.4.0"
+}

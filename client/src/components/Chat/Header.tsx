@@ -9,6 +9,11 @@ import { OpenSidebar, PresetsMenu } from './Menus';
 import BookmarkMenu from './Menus/BookmarkMenu';
 import { TemporaryChat } from './TemporaryChat';
 import AddMultiConvo from './AddMultiConvo';
+import RuntimeDashboard from '../Desktop/RuntimeDashboard';
+import SplitChatDialog from '../Desktop/SplitChatDialog';
+import KnowledgeDashboard from '../Desktop/KnowledgeDashboard';
+import AgentStudioDashboard from '../Desktop/AgentStudioDashboard';
+import PlatformStudioDashboard from '../Desktop/PlatformStudioDashboard';
 import { useHasAccess } from '~/hooks';
 import { cn } from '~/utils';
 import store from '~/store';
@@ -54,6 +59,11 @@ function Header() {
               )}
             >
               <ModelSelector startupConfig={startupConfig} />
+              <RuntimeDashboard />
+              <KnowledgeDashboard />
+              <AgentStudioDashboard />
+              <PlatformStudioDashboard />
+              <SplitChatDialog />
               {interfaceConfig.presets === true && interfaceConfig.modelSelect && <PresetsMenu />}
               {hasAccessToBookmarks === true && <BookmarkMenu />}
               {hasAccessToMultiConvo === true && <AddMultiConvo />}

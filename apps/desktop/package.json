@@ -1,0 +1,15 @@
+{
+  "name": "@northbridge/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm --prefix ../.. run desktop:stage",
+    "dev": "tauri dev",
+    "prebuild": "npm --prefix ../.. run desktop:stage:release",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

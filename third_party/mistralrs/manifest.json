@@ -1,0 +1,14 @@
+{
+  "upstreamVersion": "0.9.0",
+  "securityProfile": "loopback-cli-no-agent-tools-v1",
+  "platforms": {
+    "x86_64-pc-windows-msvc": {
+      "archiveUrl": "https://github.com/EricLBuehler/mistral.rs/releases/download/v0.9.0/mistralrs-cpu-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "5d86e276d21f013cbb5c514f73791a8954235cf91ab722f9f2a073332f76ac3b",
+      "archiveMember": "mistralrs.exe",
+      "binarySha256": "2cb7f8945167ed556239022e7e895ef7b9621c3448cae5ac3bff41f487a9c881",
+      "versionMarker": "mistralrs 0.9.0",
+      "acceleration": "cpu"
+    }
+  }
+}
