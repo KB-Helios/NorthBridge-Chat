@@ -1,11 +1,15 @@
 import './polyfills/regeneratorRuntime';
 import { createRoot } from 'react-dom/client';
+import { setRequestOverride } from 'librechat-data-provider';
+import { initializeDesktopTransport, isDesktopRuntime } from '@northbridge/desktop-transport';
 import { initializeI18n } from './locales/i18n';
 import App from './App';
 import '@librechat/client/style.css';
 import './style.css';
 import './mobile.css';
 import { ApiErrorBoundaryProvider } from './hooks/ApiErrorBoundaryContext';
+import { createDesktopRequestOverride } from './desktop/requestOverride';
+import { DesktopStartupError } from './components/Desktop';
 import 'katex/dist/katex.min.css';
 import 'katex/dist/contrib/copy-tex.js';
 
@@ -20,6 +24,23 @@ const root = createRoot(container);
 
 async function bootstrap() {
   await initializeI18n();
+  try {
+    const desktopTransport = await initializeDesktopTransport();
+    if (desktopTransport != null) {
+      setRequestOverride(createDesktopRequestOverride(desktopTransport));
+    }
+  } catch (error) {
+    console.error('[desktop] Failed to initialize the local runtime', error);
+    if (isDesktopRuntime()) {
+      root.render(
+        <ApiErrorBoundaryProvider>
+          <DesktopStartupError />
+        </ApiErrorBoundaryProvider>,
+      );
+      return;
+    }
+    throw error;
+  }
 
   root.render(
     <ApiErrorBoundaryProvider>

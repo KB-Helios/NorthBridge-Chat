@@ -1,0 +1,31 @@
+[package]
+name = "northbridge-desktop-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "desktop-core"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+northbridge-ai-gateway = { path = "../ai-gateway" }
+northbridge-core-api = { path = "../core-api" }
+northbridge-domain = { path = "../domain" }
+northbridge-model-manager = { path = "../model-manager" }
+northbridge-storage = { path = "../storage" }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tower.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
+url.workspace = true

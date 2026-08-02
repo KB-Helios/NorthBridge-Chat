@@ -44,6 +44,8 @@ export {
   buildLoginRedirectUrl,
 } from './api-endpoints';
 export { default as request } from './request';
+export { setRequestOverride } from './request';
+export type { RequestOverride, RequestOverrideMethod, RequestOverrideResult } from './request';
 export { dataService };
 import * as dataService from './data-service';
 /* general helpers */

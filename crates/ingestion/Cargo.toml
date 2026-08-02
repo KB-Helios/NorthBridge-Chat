@@ -1,0 +1,29 @@
+[package]
+name = "northbridge-ingestion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mime_guess.workspace = true
+northbridge-domain = { path = "../domain" }
+northbridge-retrieval = { path = "../retrieval" }
+northbridge-storage = { path = "../storage" }
+notify.workspace = true
+pdf-extract.workspace = true
+quick-xml.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true

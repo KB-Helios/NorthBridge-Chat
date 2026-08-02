@@ -1,6 +1,8 @@
 import { isAssistantsEndpoint } from 'librechat-data-provider';
 import type { TSubmission } from 'librechat-data-provider';
 import type { EventHandlerParams } from './useEventHandlers';
+import { isDesktopRuntime } from '@northbridge/desktop-transport';
+import useDesktopSSE from './useDesktopSSE';
 import useResumableSSE from './useResumableSSE';
 import useSSE from './useSSE';
 
@@ -27,15 +29,31 @@ export default function useAdaptiveSSE(
   const actualEndpoint = endpointType ?? endpoint;
   const isAssistants = isAssistantsEndpoint(actualEndpoint);
   const resumableEnabled = !isAssistants;
+  const desktopRuntime = isDesktopRuntime();
 
-  useSSE(resumableEnabled ? null : submission, chatHelpers, isAddedRequest, runIndex);
-
-  const { streamId } = useResumableSSE(
-    resumableEnabled ? submission : null,
+  const desktopStreamId = useDesktopSSE(
+    desktopRuntime ? submission : null,
     chatHelpers,
     isAddedRequest,
     runIndex,
   );
 
-  return { streamId, resumableEnabled };
+  useSSE(
+    !desktopRuntime && !resumableEnabled ? submission : null,
+    chatHelpers,
+    isAddedRequest,
+    runIndex,
+  );
+
+  const { streamId } = useResumableSSE(
+    !desktopRuntime && resumableEnabled ? submission : null,
+    chatHelpers,
+    isAddedRequest,
+    runIndex,
+  );
+
+  return {
+    streamId: desktopRuntime ? desktopStreamId : streamId,
+    resumableEnabled: desktopRuntime || resumableEnabled,
+  };
 }

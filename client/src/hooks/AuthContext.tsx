@@ -30,6 +30,7 @@ import { TAuthConfig, TUserContext, TAuthContext, TResError } from '~/common';
 import { SESSION_KEY, isSafeRedirect, getPostLoginRedirect } from '~/utils';
 import useTimeout from './useTimeout';
 import store from '~/store';
+import { getDesktopTransport, isDesktopRuntime } from '@northbridge/desktop-transport';
 
 const AuthContext = (import.meta.hot?.data?.__AuthContext ??
   createContext<TAuthContext | undefined>(undefined)) as React.Context<TAuthContext | undefined>;
@@ -44,25 +45,28 @@ const AuthContextProvider = ({
   authConfig?: TAuthConfig;
   children: ReactNode;
 }) => {
+  const desktopRuntime = isDesktopRuntime();
   const isExternalRedirectRef = useRef(false);
   const [user, setUser] = useRecoilState(store.user);
   const logoutRedirectRef = useRef<string | undefined>(undefined);
-  const [token, setToken] = useState<string | undefined>(undefined);
+  const [token, setToken] = useState<string | undefined>(
+    desktopRuntime ? getDesktopTransport()?.bootstrap.sessionToken : undefined,
+  );
   const [error, setError] = useState<string | undefined>(undefined);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(desktopRuntime);
   const setQueriesEnabled = useSetRecoilState<boolean>(store.queriesEnabled);
 
   const userRoleName = user?.role ?? '';
   const isCustomRole = isAuthenticated && !!user?.role && !isSystemRoleName(user.role);
 
   const { data: userRole = null } = useGetRole(SystemRoles.USER, {
-    enabled: !!(isAuthenticated && (user?.role ?? '')),
+    enabled: !desktopRuntime && !!(isAuthenticated && (user?.role ?? '')),
   });
   const { data: adminRole = null } = useGetRole(SystemRoles.ADMIN, {
-    enabled: !!(isAuthenticated && user?.role === SystemRoles.ADMIN),
+    enabled: !desktopRuntime && !!(isAuthenticated && user?.role === SystemRoles.ADMIN),
   });
   const { data: customRole = null } = useGetRole(isCustomRole ? userRoleName : '_', {
-    enabled: isCustomRole,
+    enabled: !desktopRuntime && isCustomRole,
   });
 
   const navigate = useNavigate();
@@ -100,7 +104,7 @@ const AuthContextProvider = ({
   );
   const doSetError = useTimeout({ callback: (error) => setError(error as string | undefined) });
 
-  const loginUser = useLoginUserMutation({
+  const { mutate: loginUser } = useLoginUserMutation({
     onSuccess: (data: t.TLoginResponse) => {
       const { user, token, twoFAPending, tempToken } = data;
       if (twoFAPending) {
@@ -124,7 +128,7 @@ const AuthContextProvider = ({
       navigate(loginPath, { replace: true });
     },
   });
-  const logoutUser = useLogoutUserMutation({
+  const { mutate: logoutUser } = useLogoutUserMutation({
     onSuccess: (data) => {
       if (data.redirect) {
         /** data.redirect is the IdP's end_session_endpoint URL — an absolute URL generated
@@ -157,21 +161,35 @@ const AuthContextProvider = ({
 
   const logout = useCallback(
     (redirect?: string) => {
+      if (desktopRuntime) {
+        navigate(redirect?.startsWith('/c/') ? redirect : '/c/new', { replace: true });
+        return;
+      }
       if (redirect) {
         logoutRedirectRef.current = redirect;
       }
-      logoutUser.mutate(undefined);
+      logoutUser(undefined);
     },
-    [logoutUser],
+    [desktopRuntime, logoutUser, navigate],
   );
 
-  const userQuery = useGetUserQuery({ enabled: !!(token ?? '') });
+  const userQuery = useGetUserQuery({ enabled: !desktopRuntime && !!(token ?? '') });
 
-  const login = (data: t.TLoginUser) => {
-    loginUser.mutate(data);
-  };
+  const login = useCallback(
+    (data: t.TLoginUser) => {
+      if (desktopRuntime) {
+        navigate('/c/new', { replace: true });
+        return;
+      }
+      loginUser(data);
+    },
+    [desktopRuntime, loginUser, navigate],
+  );
 
   const silentRefresh = useCallback(() => {
+    if (desktopRuntime) {
+      return;
+    }
     if (authConfig?.test === true) {
       console.log('Test mode. Skipping silent refresh.');
       return;
@@ -219,7 +237,34 @@ const AuthContextProvider = ({
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are stable at mount; adding refreshToken causes infinite re-fire
-  }, []);
+  }, [desktopRuntime]);
+
+  useEffect(() => {
+    if (!desktopRuntime) {
+      return;
+    }
+    const now = new Date().toISOString();
+    const sessionToken = getDesktopTransport()?.bootstrap.sessionToken;
+    const desktopUser: t.TUser = {
+      id: 'northbridge-local-user',
+      username: 'local',
+      email: 'local@northbridge.invalid',
+      name: 'Local user',
+      avatar: '',
+      role: SystemRoles.USER,
+      provider: 'desktop',
+      createdAt: now,
+      updatedAt: now,
+    };
+    setUser(desktopUser);
+    setToken(sessionToken);
+    setTokenHeader(sessionToken);
+    setIsAuthenticated(true);
+    setQueriesEnabled(true);
+    if (window.location.pathname === '/' || window.location.pathname.startsWith('/login')) {
+      navigate('/c/new', { replace: true });
+    }
+  }, [desktopRuntime, navigate, setQueriesEnabled, setUser]);
 
   useEffect(() => {
     if (isExternalRedirectRef.current) {
@@ -293,6 +338,8 @@ const AuthContextProvider = ({
       isCustomRole,
       userRoleName,
       customRole,
+      login,
+      logout,
     ],
   );
 

@@ -1,3 +1,6 @@
 # Force LF line endings for shell scripts and git hooks (required for cross-platform compatibility)
 .husky/* text eol=lf
 *.sh text eol=lf
+
+# Patch files intentionally preserve upstream context indentation.
+*.patch -whitespace

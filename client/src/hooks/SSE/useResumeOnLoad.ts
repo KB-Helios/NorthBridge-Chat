@@ -3,6 +3,7 @@ import { useSetRecoilState, useRecoilValue, useRecoilCallback } from 'recoil';
 import { Constants, tMessageSchema, isAssistantsEndpoint } from 'librechat-data-provider';
 import type { TMessage, TConversation, TSubmission, Agents } from 'librechat-data-provider';
 import type { StreamStatusResponse } from '~/data-provider';
+import { isDesktopRuntime } from '@northbridge/desktop-transport';
 import {
   dedupeSteersById,
   applyPendingAction,
@@ -211,7 +212,7 @@ export default function useResumeOnLoad(
   const endpoint = currentConversation?.endpoint;
   const endpointType = currentConversation?.endpointType;
   const actualEndpoint = endpointType ?? endpoint;
-  const resumableEnabled = !isAssistantsEndpoint(actualEndpoint);
+  const resumableEnabled = !isDesktopRuntime() && !isAssistantsEndpoint(actualEndpoint);
   // Track conversations we've already processed (either resumed or skipped)
   const processedConvoRef = useRef<string | null>(null);
   const restoreResumeBranch = useRecoilCallback(

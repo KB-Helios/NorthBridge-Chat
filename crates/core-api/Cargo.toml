@@ -1,0 +1,39 @@
+[package]
+name = "northbridge-core-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+argon2.workspace = true
+axum.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+http.workspace = true
+keyring.workspace = true
+northbridge-ai-gateway = { path = "../ai-gateway" }
+northbridge-agent-runtime = { path = "../agent-runtime" }
+northbridge-domain = { path = "../domain" }
+northbridge-ingestion = { path = "../ingestion" }
+northbridge-model-manager = { path = "../model-manager" }
+northbridge-retrieval = { path = "../retrieval" }
+northbridge-storage = { path = "../storage" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "northbridge-agent-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+a2a-client-lf.workspace = true
+a2a-lf.workspace = true
+a2a-server-lf.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+northbridge-ai-gateway = { path = "../ai-gateway" }
+northbridge-domain = { path = "../domain" }
+northbridge-storage = { path = "../storage" }
+reqwest.workspace = true
+rig-agent.workspace = true
+rig-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

@@ -1,0 +1,66 @@
+diff --git a/crates/agentgateway-app/src/commands/run.rs b/crates/agentgateway-app/src/commands/run.rs
+index 1b580ed..37b5af1 100644
+--- a/crates/agentgateway-app/src/commands/run.rs
++++ b/crates/agentgateway-app/src/commands/run.rs
+@@ -19,7 +19,7 @@ pub(crate) fn execute(args: RunArgs) -> anyhow::Result<()> {
+ 	} = args;
+ 
+ 	if version_short {
+-		println!("{}", version::BuildInfo::new().version);
++		println!("northbridge-loopback-v1.4.0");
+ 		return Ok(());
+ 	}
+ 	if version_long {
+diff --git a/crates/agentgateway/src/types/local.rs b/crates/agentgateway/src/types/local.rs
+index c76179f..c767430 100644
+--- a/crates/agentgateway/src/types/local.rs
++++ b/crates/agentgateway/src/types/local.rs
+@@ -2789,10 +2789,10 @@ async fn convert_local_config(
+ 			ls.insert(l)
+ 		}
+ 		let sockaddr = if cfg!(target_family = "unix") && config.ipv6_enabled {
+-			SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), bind_port)
++			SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), bind_port)
+ 		} else {
+ 			// Windows and IPv6 don't mix well apparently?
+-			SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), bind_port)
++			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bind_port)
+ 		};
+ 		let b = Bind {
+ 			key: bind_name,
+@@ -3358,9 +3358,9 @@ async fn convert_gateways(
+ 			refs.insert(gateway_name, listener_keys);
+ 		}
+ 		let sockaddr = if cfg!(target_family = "unix") && config.ipv6_enabled {
+-			SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)
++			SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)
+ 		} else {
+-			SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
++			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+ 		};
+ 		all_binds.push(Bind {
+ 			key: strng::format!("bind/{port}"),
+@@ -4446,9 +4446,9 @@ async fn convert_llm_config(
+ 
+ 	// Create bind
+ 	let sockaddr = if cfg!(target_family = "unix") && config.ipv6_enabled {
+-		SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)
++		SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)
+ 	} else {
+-		SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
++		SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+ 	};
+ 
+ 	let bind = Bind {
+@@ -4539,9 +4539,9 @@ async fn convert_mcp_config(
+ 	listener_set.insert(listener);
+ 
+ 	let sockaddr = if cfg!(target_family = "unix") && config.ipv6_enabled {
+-		SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)
++		SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)
+ 	} else {
+-		SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
++		SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+ 	};
+ 
+ 	let bind = Bind {
